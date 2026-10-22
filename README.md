@@ -19,6 +19,7 @@
 - [准备外部资源目录](#准备外部资源目录)
 - [上手三步](#上手三步)
 - [处理流程](#处理流程)
+- [可调后处理](#可调后处理)
 - [C API](#c-api)
 - [常见问题](#常见问题)
 - [已知限制](#已知限制)
@@ -40,7 +41,7 @@
 | --- | --- |
 | 主机 | Apple Silicon macOS（已在 Apple M4 Pro / macOS 27.0.1 上测试，其他机型尚未验证） |
 | 固件 | Xperia 5 V `67.1.A.2.229`，按资源精确哈希识别 |
-| 输入 | RIFF/WAVE，格式标签 1，48 kHz，立体声，有符号 PCM16 |
+| DSEE 输入 | RIFF/WAVE，格式标签 1，48 kHz，立体声，有符号 PCM16 |
 | 输出 | 立体声有符号 PCM32，48、96（默认）或 192 kHz |
 | 源元数据配置 | `pcm`（默认）、`aac128`、`mp3128` |
 
@@ -59,7 +60,7 @@ CMake 在非 Apple Silicon macOS 上会直接报错停止。
 
 - **Apple Silicon macOS** 与 **Xcode Command Line Tools**。
 - **CMake 3.20+**。
-- **Python 3**——仅测试和仓库检查需要。
+- **Python 3**——仅开发测试和仓库检查需要，音频处理运行时不需要。
 
 构建过程不下载任何依赖包，也不需要 Sony 资源。
 
@@ -71,7 +72,8 @@ cmake --build build -j 4
 ctest --test-dir build --output-on-failure
 ```
 
-产物是 `build/dsee-compat`（CLI）和 `build/libdsee_compat.a`（静态库）。
+产物是 `build/dsee-compat`（CLI）、`build/libdsee_compat.a`（兼容运行时）和
+`build/libdsee_postprocess.a`（原生后处理静态库）。
 加 `-DBUILD_TESTING=OFF` 可以只构建 CLI 和静态库，不需要 Python。
 
 ### 安装
@@ -80,7 +82,7 @@ ctest --test-dir build --output-on-failure
 cmake --install build --prefix <目标目录>
 ```
 
-会安装 CLI、静态库和 C 头文件。
+会安装 CLI、两个静态库，以及 `dsee_compat.h` 和 `dsee_postprocess.hpp`。
 
 ## 准备外部资源目录
 
@@ -131,6 +133,30 @@ cmake --install build --prefix <目标目录>
 - 保留算法延迟和零输入产生的尾部，因此**输出可能比输入长**。不做自动对齐、归一化，也不会为不支持的输入重采样。
 - 空输入得到一个空 WAV。
 
+## 可调后处理
+
+原生 C++ 后处理支持**自适应频谱包络约束、分频混合及两者叠加**，无需额外运行环境。
+可以通过 `process --postprocess mix` 在 DSEE 处理后直接应用，默认参考音频就是输入 WAV；
+也可以用独立入口对已有 WAV 反复调参，该入口不需要 Sony 资源：
+
+```sh
+build/dsee-compat postprocess \
+  --reference input.wav --input dsee.wav --output smooth.wav \
+  --mode combined --mix 0.5 --curve cosine \
+  --crossover-low 18000 --crossover-high 22000 \
+  --envelope-strength 1 --max-cut-db 12
+```
+
+- `--mode adaptive|mix|combined|none`：单独包络、单独混合、叠加或原样输出；集成入口用 `--postprocess` 选择。
+- `--mix 0.5`：高频最多混入 50% 处理信号；`--mix 1`：原信号降至 0%，处理信号升至 100%。
+- `--curve linear|cosine`、交接频率、包络强度、最大衰减和时间平滑均可调。
+- 自动估计延迟；短音频、静音和周期纯音可用 `--reference-delay` 指定输出采样率下的样本数。
+- 后处理接受双声道 PCM16/PCM32 WAV，输出 PCM32 WAV；不处理元数据和封面。
+
+`process` 默认关闭后处理，C API 行为不变。若使用未经降音量的原曲作单独参考，而 DSEE 输入
+降低过 3 dB，加 `--reference-gain-db -3`；使用实际输入 WAV 作参考时保持 0。
+全部参数、格式限制、C++ 接口和 50%/100% 的含义见[后处理文档](docs/POSTPROCESS.md)。
+
 ## C API
 
 包含 `dsee_compat.h`，链接 `libdsee_compat.a` 和 C++ 标准库。头文件是合法的 C。
@@ -153,8 +179,8 @@ dsee_inspect → dsee_create → 多次 dsee_process → 多次 dsee_finish → 
 哪怕只改了一个字节，都会在执行任何代码之前被拒绝。先用 `inspect` 确认资源目录布局和文件是否正确。
 
 **我的 WAV 为什么打不开？**
-输入只接受格式标签 1、48 kHz、立体声、16 位整数 PCM。44.1 kHz、24 位、浮点、RF64 和 WAVE extensible 都不支持，
-也不会自动转换。请先用你自己的工具转换成 48 kHz 立体声 PCM16。
+`process` 输入只接受格式标签 1、48 kHz、立体声、16 位整数 PCM。请先用自己的工具转换成这一格式。
+独立 `postprocess` 支持 PCM16/PCM32 和上述后处理采样率；两者都不支持 24 位、浮点、RF64 和 WAVE extensible。
 
 **为什么输出比输入长？**
 算法有延迟，处理结束时还会送入零块把尾部排空，这些输出都保留下来，不做裁剪或对齐。
@@ -168,14 +194,15 @@ JSON 摘要里的 `padding_frames` 是补进去的零输入帧数。
 它先写同目录临时文件，完成后再原子发布，不会替换已有文件；转换失败会删除临时文件。
 
 **能同时开多个实例或多线程处理吗？**
-当前版本不行。每个进程只允许一个活动实例，并发调用返回 `DSEE_BUSY`，可以等另一个调用完成后重试。
+DSEE 运行时每个进程只允许一个活动实例，并发调用返回 `DSEE_BUSY`，可以等另一个调用完成后重试。
+独立后处理 C++ API 可用互不共享的音源和输出并行调用。
 
 ## 已知限制
 
 - **只在 Apple M4 Pro / macOS 27.0.1 上测试过**，其他 Apple Silicon 机型、其他固件版本都未验证。
 - **没有拿 Xperia 真机的输出做过比对**：目前的一致性只针对本地研究用的原始 wrapper 参考结果。
-- 不支持 RF64、WAVE extensible、24 位、浮点和 44.1 kHz 输入。
-- 没有 GUI、没有 Audio Unit，不支持多实例并发或多线程处理。
+- 不支持 RF64、WAVE extensible、24 位和浮点；DSEE 输入仍限定为 48 kHz PCM16。
+- 没有 GUI、没有 Audio Unit；DSEE 运行时不支持多实例并发。
 - 不是沙箱：任意原生段错误和主机内存耗尽不在错误处理保证之内。
 
 ## 测试
@@ -184,6 +211,7 @@ JSON 摘要里的 `padding_frames` 是补进去的零输入帧数。
 
 `ctest` 使用自己生成的 ELF/WAV 夹具，覆盖 ELF 范围与溢出拒绝、RELA/APS2/RELR 解码、WAV 解析、
 原子输出、CLI 错误、C 头文件链接和 API 错误。
+原生后处理测试使用合成音频，覆盖重建、混合响应、延迟、重采样、包络和边界行为，不需要可选 DSP 依赖。
 
 ### 可选的本地集成测试
 
@@ -217,6 +245,7 @@ python3 tools/check_distribution.py
 ## 文档
 
 [C API 约定](docs/API.md) ·
+[可调后处理](docs/POSTPROCESS.md) ·
 [验证记录](docs/VALIDATION.md) ·
 [分发边界与来源说明](docs/DISTRIBUTION.md)
 

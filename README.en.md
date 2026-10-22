@@ -22,6 +22,7 @@ for test results and performance numbers see the [validation record](docs/VALIDA
 - [Preparing the external resource directory](#preparing-the-external-resource-directory)
 - [Three steps to your first conversion](#three-steps-to-your-first-conversion)
 - [How processing works](#how-processing-works)
+- [Adjustable postprocessing](#adjustable-postprocessing)
 - [C API](#c-api)
 - [FAQ](#faq)
 - [Known limitations](#known-limitations)
@@ -48,7 +49,7 @@ for test results and performance numbers see the [validation record](docs/VALIDA
 | --- | --- |
 | Host | Apple Silicon macOS (tested on Apple M4 Pro / macOS 27.0.1; other systems not yet validated) |
 | Firmware | Xperia 5 V `67.1.A.2.229`, identified by exact resource hashes |
-| Input | RIFF/WAVE, format tag 1, 48 kHz, stereo, signed PCM16 |
+| DSEE input | RIFF/WAVE, format tag 1, 48 kHz, stereo, signed PCM16 |
 | Output | Stereo signed PCM32 at 48, 96 (default) or 192 kHz |
 | Source metadata profile | `pcm` (default), `aac128`, `mp3128` |
 
@@ -68,7 +69,7 @@ CMake stops with an error on anything other than Apple Silicon macOS.
 
 - **Apple Silicon macOS** and **Xcode Command Line Tools**.
 - **CMake 3.20+**.
-- **Python 3** — only for tests and repository checks.
+- **Python 3** — only for development tests and repository checks; audio processing does not need it.
 
 The build downloads no packages and needs no Sony resources.
 
@@ -80,7 +81,8 @@ cmake --build build -j 4
 ctest --test-dir build --output-on-failure
 ```
 
-Outputs are `build/dsee-compat` (CLI) and `build/libdsee_compat.a` (static library).
+Outputs are `build/dsee-compat` (CLI), `build/libdsee_compat.a` (compatibility runtime) and
+`build/libdsee_postprocess.a` (native postprocessing library).
 Add `-DBUILD_TESTING=OFF` to build only the CLI and static library, without Python.
 
 ### Install
@@ -89,7 +91,7 @@ Add `-DBUILD_TESTING=OFF` to build only the CLI and static library, without Pyth
 cmake --install build --prefix <destination>
 ```
 
-This installs the CLI, static library, and C header.
+This installs the CLI, both static libraries, `dsee_compat.h` and `dsee_postprocess.hpp`.
 
 ## Preparing the external resource directory
 
@@ -146,6 +148,32 @@ Run `build/dsee-compat --help` for usage and `--version` for the version.
   alignment, normalization, or resampling of unsupported input is performed.
 - Empty input produces an empty WAV.
 
+## Adjustable postprocessing
+
+Native C++ postprocessing provides **adaptive spectral-envelope attenuation, frequency-band mixing,
+or both**, without additional runtime dependencies. Use `process --postprocess mix` to apply it after
+DSEE with the input WAV as reference, or adjust an existing result with the standalone entry point,
+which needs no Sony resources:
+
+```sh
+build/dsee-compat postprocess \
+  --reference input.wav --input dsee.wav --output smooth.wav \
+  --mode combined --mix 0.5 --curve cosine \
+  --crossover-low 18000 --crossover-high 22000 \
+  --envelope-strength 1 --max-cut-db 12
+```
+
+- `--mode adaptive|mix|combined|none` selects individual effects, both, or exact bypass; the integrated command uses `--postprocess`.
+- `--mix 0.5` caps processed amplitude at 50%; `--mix 1` completes a 100%-to-0% reference / 0%-to-100% processed crossover.
+- Crossover frequencies, `linear|cosine` shape, envelope strength, attenuation limit and time smoothing are adjustable.
+- Delay is measured automatically; use `--reference-delay` in output-rate samples for short/silent audio or periodic tones.
+- Postprocessing accepts stereo PCM16/PCM32 WAV and writes PCM32 WAV. Metadata and artwork are not handled.
+
+`process` defaults to no postprocessing; the C API behavior is unchanged. If a separate reference is
+an original that was lowered by 3 dB before DSEE processing, add `--reference-gain-db -3`. Leave gain at
+zero when referencing the actual input WAV. See the [postprocessing guide](docs/POSTPROCESS.md) for all
+controls, format restrictions, C++ use and the meanings of 50% and 100%.
+
 ## C API
 
 Include `dsee_compat.h`, link `libdsee_compat.a` and the C++ standard library. The header is valid C.
@@ -171,9 +199,9 @@ versions or modified files — even by a single byte — are rejected before any
 confirm the directory layout and files.
 
 **Why won't my WAV open?**
-Input must be format tag 1, 48 kHz, stereo, 16-bit integer PCM. 44.1 kHz, 24-bit, float, RF64 and WAVE
-extensible are not supported and are not converted automatically. Convert to 48 kHz stereo PCM16 with your own
-tools first.
+`process` requires format tag 1, 48 kHz stereo PCM16; convert to that format with your own tools first.
+Standalone `postprocess` supports PCM16/PCM32 and the documented postprocessing rates. Neither accepts
+24-bit, float, RF64 or WAVE extensible.
 
 **Why is the output longer than the input?**
 The algorithm has latency, and zero blocks are fed at the end to drain the tail. All of that output is kept;
@@ -189,8 +217,9 @@ size limit. It writes a temporary file beside the destination and publishes it a
 existing destination; a failed conversion removes its temporary output.
 
 **Can I run several instances or process on multiple threads?**
-Not in this version. One active instance is allowed per process, and concurrent calls return `DSEE_BUSY`, which
-can be retried after the other call completes.
+The DSEE runtime allows one active instance per process; concurrent calls return `DSEE_BUSY` and can be
+retried after the other call completes. The independent C++ postprocessor permits parallel calls with
+distinct sources and sinks.
 
 ## Known limitations
 
@@ -198,8 +227,8 @@ can be retried after the other call completes.
   validated.
 - **Xperia hardware output has not been captured for comparison**; current matches are against the local
   original-wrapper research reference.
-- No RF64, WAVE extensible, 24-bit, float or 44.1 kHz input.
-- No GUI, no Audio Unit, no concurrent instances or multi-threaded processing.
+- No RF64, WAVE extensible, 24-bit or float. DSEE input remains restricted to 48 kHz PCM16.
+- No GUI or Audio Unit; the DSEE runtime does not support concurrent instances.
 - Not a sandbox: arbitrary native segmentation faults and host out-of-memory conditions are outside the
   error-handling guarantee.
 
@@ -209,6 +238,8 @@ can be retried after the other call completes.
 
 `ctest` uses self-generated ELF/WAV fixtures covering ELF range/overflow rejection, RELA/APS2/RELR decoding, WAV
 parsing, atomic output, CLI errors, C header linkage and API errors.
+Native synthetic postprocessing checks cover reconstruction, mixing response, delay, resampling, envelope
+behavior and error paths without optional DSP dependencies.
 
 ### Optional local integration tests
 
@@ -245,6 +276,7 @@ is permitted.
 ## Documentation
 
 [C API contract](docs/API.md) ·
+[Adjustable postprocessing](docs/POSTPROCESS.md) ·
 [Validation record](docs/VALIDATION.md) ·
 [Distribution boundaries and provenance](docs/DISTRIBUTION.md)
 

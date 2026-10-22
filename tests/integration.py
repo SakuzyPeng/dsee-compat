@@ -22,6 +22,7 @@ a=p.parse_args()
 exe=str(pathlib.Path(a.exe).resolve())
 cases=json.loads(pathlib.Path(a.reference_results).read_text())['cases']
 results=[]
+postprocess_results=[]
 with tempfile.TemporaryDirectory(prefix='dsee-integration-') as tmp:
     root=pathlib.Path(tmp)
     for kind in ['silence','impulse','tone','noise']:
@@ -55,6 +56,25 @@ with tempfile.TemporaryDirectory(prefix='dsee-integration-') as tmp:
         denied=subprocess.run(args,capture_output=True,text=True)
         assert denied.returncode!=0 and before==hashlib.sha256((root/'out.wav').read_bytes()).hexdigest()
         (root/'out.wav').unlink()
+    # The integrated and standalone commands must produce identical PCM when
+    # given the same native output/reference, including inferred latency.
+    for rate in (48000,96000,192000):
+        base=[exe,'process','--assets',a.assets,'--input',str(root/'noise.wav'),
+              '--output-rate',str(rate)]
+        subprocess.run(base+['--output',str(root/'native.wav')],check=True,capture_output=True)
+        for mode in ('none','mix','adaptive','combined'):
+            integrated=subprocess.run(base+['--output',str(root/'integrated.wav'),
+                                            '--postprocess',mode],check=True,capture_output=True,text=True)
+            standalone=subprocess.run([exe,'postprocess','--input',str(root/'native.wav'),
+                                       '--reference',str(root/'noise.wav'),'--output',str(root/'standalone.wav'),
+                                       '--mode',mode],check=True,capture_output=True,text=True)
+            assert (root/'integrated.wav').read_bytes()==(root/'standalone.wav').read_bytes(),(rate,mode)
+            stats=json.loads(standalone.stdout)
+            postprocess_results.append({'rate':rate,'mode':mode,'integrated_matches':True,
+                                        'output_frames':stats['output_frames'],
+                                        'postprocess':stats['postprocess']})
+            (root/'integrated.wav').unlink();(root/'standalone.wav').unlink()
+        (root/'native.wav').unlink()
     # Verify resources are checked before the tool creates an output file.
     bad=root/'bad-assets/vendor/lib64';bad.mkdir(parents=True)
     lib=bytearray((pathlib.Path(a.assets)/'vendor/lib64/libsonydseehxwrapper.so').read_bytes());lib[-1]^=1
@@ -62,5 +82,6 @@ with tempfile.TemporaryDirectory(prefix='dsee-integration-') as tmp:
     failed=subprocess.run([exe,'process','--assets',str(root/'bad-assets'),'--input',str(root/'tone.wav'),'--output',str(root/'bad-out.wav')],capture_output=True,text=True)
     assert failed.returncode!=0 and 'SHA-256' in failed.stderr and not (root/'bad-out.wav').exists()
     assert not list(root.glob('*.tmp.*'))
-pathlib.Path(a.report).write_text(json.dumps({'passed':len(results),'reference':'external research fixture hashes','cases':results},indent=2)+'\n')
-print(f'{len(results)} original-wrapper reference comparisons passed; output refusal and corrupt-resource checks passed')
+pathlib.Path(a.report).write_text(json.dumps({'passed':len(results),'reference':'external research fixture hashes',
+                                            'cases':results,'postprocess_cases':postprocess_results},indent=2)+'\n')
+print(f'{len(results)} original-wrapper references and {len(postprocess_results)} integrated/standalone comparisons passed; output refusal and corrupt-resource checks passed')

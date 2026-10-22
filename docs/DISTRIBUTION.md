@@ -1,8 +1,8 @@
 # Distribution boundaries and provenance
 
-This repository contains independently written compatibility code, interface declarations, synthetic test generators, resource identity hashes and documentation. Its MIT license applies only to those materials. It grants no rights to Sony or other third-party programs, model weights, parameters or trademarks.
+This repository contains independently written compatibility code, optional offline postprocessing DSP, interface declarations, synthetic test generators, resource identity hashes and documentation. Its MIT license applies only to those materials. It grants no rights to Sony or other third-party programs, model weights, parameters or trademarks.
 
-The implementation was developed using local binary inspection and behavioral testing. It is **not represented as a strict clean-room implementation**. No decompiler output, DSP implementation, original machine-code body, model data or firmware image is included in the source tree. Necessary symbol names, object-layout offsets and resource identity information describe the supported interface, not a redistribution of the implementation.
+The implementation was developed using local binary inspection and behavioral testing. It is **not represented as a strict clean-room implementation**. No decompiler output, proprietary DSP implementation, original machine-code body, model data or firmware image is included in the source tree. Necessary symbol names, object-layout offsets and resource identity information describe the supported interface, not a redistribution of the implementation.
 
 The ELF parser and loader are implemented here. The Android packed-relocation format was checked against the [AOSP linker specification/implementation](https://android.googlesource.com/platform/bionic/+/master/linker/linker_reloc_iterators.h). ABI differences are documented by [Apple](https://developer.apple.com/documentation/xcode/writing-arm64-code-for-apple-platforms). No third-party source implementation is vendored.
 

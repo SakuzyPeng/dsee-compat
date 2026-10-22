@@ -2,6 +2,11 @@
 
 The installed header is the authoritative signature reference. ABI values of public statuses and source profiles are fixed for the 0.1 series. Processing input/output is interleaved stereo; a frame contains two samples. Input is signed 16-bit, output signed 32-bit. These representations match little-endian Apple Silicon.
 
+Optional envelope/crossover controls are exposed by the separate C++ API in `dsee_postprocess.hpp`
+and both WAV CLI entry points, documented in [POSTPROCESS.md](POSTPROCESS.md). Link
+`libdsee_postprocess.a` to use them directly with seekable `AudioSource` instances and a PCM32 sink.
+They do not alter this streaming API's ABI or pinned resource profile.
+
 ## Lifecycle
 
 - `dsee_inspect(root)` validates all supported profile files without executing firmware. It does not reserve an instance.

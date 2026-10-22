@@ -25,7 +25,7 @@ ctest --test-dir build -R unit --output-on-failure  # single test: unit | api_wi
 python3 tools/check_distribution.py                 # required before commit/push
 ```
 
-CMake hard-fails on anything other than Apple Silicon macOS (`FATAL_ERROR` in `CMakeLists.txt`), so on Linux containers the C++ cannot be built or tested; only the distribution checker and Python scripts can run. Formatting follows `.clang-format` (LLVM base, 4-space indent, 100 columns). There is no separate lint step; targets compile with `-Wall -Wextra -Wpedantic`.
+CMake hard-fails on anything other than Apple Silicon macOS (`FATAL_ERROR` in `CMakeLists.txt`), so on Linux containers the CMake project cannot be built there. The postprocessing library itself uses standard C++17 only. Formatting follows `.clang-format` (LLVM base, 4-space indent, 100 columns). There is no separate lint step; targets compile with `-Wall -Wextra -Wpedantic`.
 
 Optional local native tests (need an external resource root):
 
@@ -47,10 +47,11 @@ python3 tests/integration.py --exe build/dsee-compat --assets /path/to/resource-
   - The Sony object is a 120-byte `calloc` driven by mangled symbols (`SonyDseeHx` ctor/`process`/dtor). Health checks read fixed offsets in its state via `field<T>()`; these offsets are part of the pinned profile.
   - Streaming: input is buffered into 1024-frame blocks; each block yields `1024 * rate/48000` output frames. `dsee_finish` pads the final partial block, then feeds zero blocks until 4 consecutive all-zero outputs, failing with `DSEE_TAIL_LIMIT` after 48.
   - Concurrency: a global `atomic_flag` `Lock` makes every API call return `DSEE_BUSY` on overlap, and a single `active` context is allowed per process. Error text is thread-local.
-- **`src/cli.cpp`, `src/wav.cpp`** — CLI on top of the C API only. `WavReader` accepts only 48 kHz stereo PCM16 (format tag 1). `WavWriter` writes PCM32 to a temp file beside the destination and publishes atomically, never replacing an existing file and refusing output beyond the RIFF 4 GiB limit.
+- **`src/cli.cpp`, `src/wav.cpp`** — WAV CLI with `process` and `postprocess` paths. Native input stays 48 kHz PCM16; offline readers also accept stereo PCM32 and the documented reference rates (format tag 1). `WavWriter` writes PCM32 to a temp file beside the destination and publishes atomically, never replacing an existing file and refusing output beyond the RIFF 4 GiB limit.
 - **Tests** — `tests/unit.cpp` builds synthetic ELF/WAV byte fixtures in memory; `tests/cli.py` exercises CLI error paths with a nonexistent assets root; `tests/c_header.c` checks the header compiles as C. None need Sony resources.
 - **`tools/check_distribution.py`** — scans the index and every reachable commit tree against a path allowlist (top-level files in `TOP`, plus `include/ src/ tests/ tools/ docs/` with source/text extensions), a 256 KiB blob limit, text-only content, and local-path/download-URL patterns. A new top-level file or directory must be added to its allowlist or the check fails.
+- **`src/postprocess.cpp` / `include/dsee_postprocess.hpp`** — independent C++17 offline DSP: radix-2 FFT/STFT, rational reference resampling, automatic signed alignment, stereo-linked envelope attenuation and complementary crossover. Installed as `libdsee_postprocess.a`; used by `postprocess` and optional `process --postprocess`. No external runtime, codecs, metadata or Sony resources. Native synthetic checks are in `tests/postprocess.cpp`; standard-library CLI tests in `tests/cli.py`; local integrated/standalone equivalence in `tests/integration.py`. Keep `docs/POSTPROCESS.md` synchronized.
 
 ## Docs to keep in sync
 
-`docs/API.md` (C API contract; status/profile enum values are ABI-fixed for 0.1), `docs/VALIDATION.md` (local test record), `docs/DISTRIBUTION.md` (provenance and what stays out of the repo), and the README's supported-input list. `dsee_version()` and `project(VERSION)` in `CMakeLists.txt` are both `0.1.0`.
+`docs/API.md` (C API contract; status/profile enum values are ABI-fixed for 0.1), `docs/POSTPROCESS.md` (optional offline controls), `docs/VALIDATION.md` (local test record), `docs/DISTRIBUTION.md` (provenance and what stays out of the repo), and the README's supported-input list. `dsee_version()` and `project(VERSION)` in `CMakeLists.txt` are both `0.1.0`.
