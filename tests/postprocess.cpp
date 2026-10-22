@@ -262,6 +262,182 @@ void envelope() {
     check(std::abs(no_confidence.amplitude(28000, 96000) - 0.08) < 2e-4,
           "Silent reference must not cause arbitrary attenuation");
 }
+void automatic_mix() {
+    auto options = mix();
+    options.auto_mix = true;
+    options.auto_mix_objective = dsee::AutoMixObjective::Envelope;
+    for (unsigned rate : {48000, 96000, 192000}) {
+        Source reference(rate, rate + 137), high(rate, rate + 137);
+        reference.tone(3000, 0.04);
+        for (double hz = 4250; hz < std::min(34000.0, rate / 2.0); hz += 500) {
+            double amplitude = 0.005 * std::pow(12000 / hz, 2);
+            if (hz < 20000)
+                reference.tone(hz, amplitude);
+            else
+                high.tone(hz, amplitude);
+        }
+        double previous = 1.1;
+        for (double excess : {0.5, 2.0, 4.0}) {
+            Source processed = reference;
+            for (size_t i = 0; i < processed.audio.size(); ++i) {
+                processed.audio[i].left += excess * high.audio[i].left;
+                processed.audio[i].right += excess * high.audio[i].right;
+            }
+            Run automatic(processed, &reference, options);
+            auto report = automatic.result.auto_mix;
+            check(report && !report->fallback,
+                  "Populated roll-off must yield an automatic estimate");
+            double selected = automatic.result.effective_mix;
+            check(selected < previous, "Greater high-frequency excess must lower automatic mix");
+            previous = selected;
+            check(report->achieved_coverage >= options.auto_mix_coverage,
+                  "Auto-mix window coverage");
+            check(excess == 0.5 ? selected == 1
+                                : selected > 0.8 / excess && selected < 1.6 / excess,
+                  "Automatic high-band amplitude estimate: " + std::to_string(selected));
+            auto manual = options;
+            manual.auto_mix = false;
+            manual.mix = selected;
+            Run fixed(processed, &reference, manual);
+            check(fixed.pcm == automatic.pcm, "Automatic mix must stay fixed for the entire track");
+        }
+        Run identity(reference, &reference, options);
+        check(identity.result.effective_mix == 1 && !identity.result.auto_mix->fallback,
+              "Identical signals must allow full mix");
+        if (rate == 96000) {
+            Source in_phase = reference, inverted = reference;
+            for (size_t i = 0; i < reference.audio.size(); ++i) {
+                in_phase.audio[i] = {reference.audio[i].left * 2, reference.audio[i].right * 2};
+                inverted.audio[i] = {-reference.audio[i].left * 2, -reference.audio[i].right * 2};
+            }
+            Run positive(in_phase, &reference, options), negative(inverted, &reference, options);
+            check(negative.result.effective_mix < positive.result.effective_mix,
+                  "Destructive overlap must reduce allowed mix");
+            Source scaled_reference = reference, scaled_processed = in_phase;
+            for (size_t i = 0; i < reference.audio.size(); ++i) {
+                scaled_reference.audio[i].left *= 0.25;
+                scaled_reference.audio[i].right *= 0.25;
+                scaled_processed.audio[i].left *= 0.25;
+                scaled_processed.audio[i].right *= 0.25;
+            }
+            Run scaled(scaled_processed, &scaled_reference, options);
+            check(std::abs(scaled.result.effective_mix - positive.result.effective_mix) < 1e-6,
+                  "Automatic mix must be invariant to common gain above the gate");
+            auto bounded = options;
+            bounded.auto_mix_min = 0.9;
+            bounded.auto_mix_margin_db = 0.1;
+            Run minimum(in_phase, &reference, bounded);
+            check(minimum.result.effective_mix == 0.9 &&
+                      minimum.result.auto_mix->reason == "minimum_overrides_constraint",
+                  "Explicit minimum must report a constraint override");
+            bounded = options;
+            bounded.auto_mix_max = 0.3;
+            Run maximum(reference, &reference, bounded);
+            check(maximum.result.effective_mix == 0.3, "Explicit automatic maximum");
+        }
+    }
+    Source silence(96000, 96000), short_audio(96000, 137), empty(96000, 0);
+    options.auto_mix_fallback = 0.37;
+    for (Source *source : {&silence, &short_audio, &empty}) {
+        Run fallback(*source, source, options);
+        check(fallback.result.auto_mix && fallback.result.auto_mix->fallback &&
+                  fallback.result.effective_mix == 0.37,
+              "Explicit auto-mix fallback");
+    }
+    Source narrow(96000, 96000);
+    narrow.tone(3000, 0.1);
+    Run no_envelope(narrow, &narrow, options);
+    check(no_envelope.result.auto_mix->fallback, "No upper-band evidence must use fallback");
+    Source cutoff(96000, 96000);
+    cutoff.tone(3000, 0.04);
+    for (double hz = 4250; hz < 14000; hz += 500)
+        cutoff.tone(hz, 0.005 * std::pow(12000 / hz, 2));
+    Source extended = cutoff;
+    extended.tone(22250, 0.006);
+    extended.tone(26250, 0.004);
+    Run shifted_fit(extended, &cutoff, options);
+    check(
+        !shifted_fit.result.auto_mix->fallback && shifted_fit.result.auto_mix->fit_high_hz <= 14000,
+        "Envelope fit must move below a bandwidth cutoff: " + shifted_fit.result.auto_mix->reason +
+            ", high=" + std::to_string(shifted_fit.result.auto_mix->fit_high_hz));
+    options.mode = dsee::PostprocessMode::None;
+    rejects([&] { Run invalid(short_audio, nullptr, options); }, "Auto mix in bypass mode");
+    options = mix();
+    options.auto_mix = true;
+    options.auto_mix_coverage = 0.49;
+    rejects([&] { Run invalid(short_audio, &short_audio, options); }, "Invalid auto coverage");
+    options.auto_mix_coverage = 0.9;
+    options.auto_mix_min = 0.8;
+    options.auto_mix_max = 0.2;
+    rejects([&] { Run invalid(short_audio, &short_audio, options); }, "Reversed auto bounds");
+}
+void seam_selection() {
+    auto options = mix();
+    options.auto_mix = true; // Seam continuity is the default objective.
+    Source reference(96000, 96000 + 137), extension(96000, 96000 + 137);
+    reference.tone(3000, 0.04);
+    for (double hz = 12250; hz < 34000; hz += 500) {
+        double level = 0.006 * std::pow(15000 / std::min(hz, 20000.0), 6);
+        if (hz < 20000)
+            reference.tone(hz, level);
+        else
+            extension.tone(hz, level * std::sqrt(20000 / hz));
+    }
+    Source processed = reference;
+    for (size_t i = 0; i < processed.audio.size(); ++i) {
+        processed.audio[i].left += extension.audio[i].left;
+        processed.audio[i].right += extension.audio[i].right;
+    }
+    Run joined(processed, &reference, options);
+    const auto &report = *joined.result.auto_mix;
+    check(!report.fallback && report.envelope_mix && report.seam_score_before &&
+              report.seam_score_after,
+          "Seam analysis diagnostics");
+    check(joined.result.effective_mix > 0.8 &&
+              joined.result.effective_mix > *report.envelope_mix + 0.3,
+          "Distant envelope excess must not force a deeper crossover seam: " +
+              std::to_string(joined.result.effective_mix));
+    check(*report.seam_score_after < *report.seam_score_before,
+          "Seam selection must improve the crossover shape");
+    auto fixed = options;
+    fixed.auto_mix = false;
+    fixed.mix = joined.result.effective_mix;
+    Run manual(processed, &reference, fixed);
+    check(joined.pcm == manual.pcm, "Seam selection is a fixed complementary mix");
+    auto old = options;
+    old.auto_mix_objective = dsee::AutoMixObjective::Envelope;
+    Run envelope_only(processed, &reference, old);
+    check(envelope_only.result.effective_mix == *report.envelope_mix,
+          "The old envelope decision must remain reproducible");
+    Source excess = reference;
+    for (size_t i = 0; i < excess.audio.size(); ++i) {
+        excess.audio[i].left += 4 * extension.audio[i].left;
+        excess.audio[i].right += 4 * extension.audio[i].right;
+    }
+    Run lowered(excess, &reference, options);
+    check(lowered.result.effective_mix < joined.result.effective_mix - 0.2,
+          "A strong upward step must not select full processed signal");
+    Source inverted = reference;
+    for (auto &frame : inverted.audio) {
+        frame.left *= -2;
+        frame.right *= -2;
+    }
+    Run phase_guard(inverted, &reference, options);
+    check(phase_guard.result.auto_mix->phase_limit &&
+              phase_guard.result.effective_mix <= *phase_guard.result.auto_mix->phase_limit + 1e-9,
+          "Seam preference must honor phase cancellation limits");
+    for (auto &frame : processed.audio) {
+        frame.left *= 0.25;
+        frame.right *= 0.25;
+    }
+    for (auto &frame : reference.audio) {
+        frame.left *= 0.25;
+        frame.right *= 0.25;
+    }
+    Run scaled(processed, &reference, options);
+    check(scaled.result.effective_mix == joined.result.effective_mix,
+          "Seam selection must be invariant to common gain");
+}
 void errors() {
     Source source(96000, 100);
     auto o = mix();
@@ -309,6 +485,8 @@ int main() {
         delay();
         resampling();
         envelope();
+        automatic_mix();
+        seam_selection();
         errors();
         std::cout << "Native postprocessing: reconstruction, crossover, delay, resampling, "
                      "envelope and errors passed\n";

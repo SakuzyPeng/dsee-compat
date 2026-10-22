@@ -96,4 +96,14 @@ with tempfile.TemporaryDirectory(prefix='dsee-cli-') as tmp:
     run('process','--assets','missing','--input','valid.wav','--output','out.wav','--postprocess','mix')
     assert not (root/'out.wav').exists()
     assert not list(root.glob('*.tmp.*'))
+    run('postprocess','--input','pcm32.wav','--output','bad-auto.wav','--mode','none','--mix','auto')
+    run('postprocess','--input','pcm32.wav','--output','bad-auto.wav','--auto-mix-min','0.2')
+    result=run('postprocess','--input','pcm32.wav','--reference','pcm32.wav','--output','auto.wav',
+               '--mix','auto','--reference-delay','0','--auto-mix-fallback','0.37',success=True)
+    analysis=json.loads(result.stdout)['postprocess']
+    assert analysis['effective_mix']==0.37 and analysis['auto_mix']['fallback']
+    assert analysis['parameters']['mix']=='auto'
+    assert analysis['parameters']['auto-mix-objective']=='seam'
+    run('postprocess','--input','pcm32.wav','--reference','pcm32.wav','--output','bad-auto.wav',
+        '--mix','auto','--auto-mix-objective','invalid')
 print('No-assets CLI validation passed')

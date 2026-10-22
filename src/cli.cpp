@@ -32,7 +32,10 @@ void help() {
            "Reference rates: 44.1/48/88.2/96/176.4/192 kHz. No external runtime needed.\n"
            "Standalone default: mix. Process default: none; reference defaults to input.\n"
            "Controls (all optional; frequencies in Hz):\n"
-           "  --mix 0.5                     Maximum processed amplitude weight, 0..1\n"
+           "  --mix 0.5|auto                Fixed 0..1 weight or per-track estimation\n"
+           "  --auto-mix-objective seam|envelope  Default seam continuity\n"
+           "  --auto-mix-min 0 --auto-mix-max 1 --auto-mix-fallback 0.5\n"
+           "  --auto-mix-margin-db 2 --auto-mix-coverage 0.9\n"
            "  --curve linear|cosine         Default cosine\n"
            "  --crossover-low 18000 --crossover-high 22000\n"
            "  --envelope-strength 1 --max-cut-db 12\n"
@@ -53,6 +56,11 @@ struct Deleter {
 using Arguments = std::map<std::string, std::string>;
 const std::map<std::string, double dsee::PostprocessOptions::*> controls = {
     {"--mix", &dsee::PostprocessOptions::mix},
+    {"--auto-mix-min", &dsee::PostprocessOptions::auto_mix_min},
+    {"--auto-mix-max", &dsee::PostprocessOptions::auto_mix_max},
+    {"--auto-mix-fallback", &dsee::PostprocessOptions::auto_mix_fallback},
+    {"--auto-mix-margin-db", &dsee::PostprocessOptions::auto_mix_margin_db},
+    {"--auto-mix-coverage", &dsee::PostprocessOptions::auto_mix_coverage},
     {"--crossover-low", &dsee::PostprocessOptions::crossover_low},
     {"--crossover-high", &dsee::PostprocessOptions::crossover_high},
     {"--envelope-strength", &dsee::PostprocessOptions::envelope_strength},
@@ -67,7 +75,7 @@ const std::map<std::string, double dsee::PostprocessOptions::*> controls = {
 };
 bool postprocess_option(const std::string &key) {
     return controls.count(key) || key == "--curve" || key == "--reference" ||
-           key == "--reference-delay";
+           key == "--reference-delay" || key == "--auto-mix-objective";
 }
 dsee::PostprocessMode mode(const std::string &value) {
     if (value == "none")
@@ -87,6 +95,10 @@ dsee::PostprocessOptions settings(const Arguments &args, const std::string &sele
         auto value = args.find(control.first);
         if (value == args.end())
             continue;
+        if (control.first == "--mix" && value->second == "auto") {
+            result.auto_mix = true;
+            continue;
+        }
         size_t used = 0;
         double number = std::stod(value->second, &used);
         if (used != value->second.size() || !std::isfinite(number))
@@ -106,6 +118,16 @@ dsee::PostprocessOptions settings(const Arguments &args, const std::string &sele
         if (used != args.at("--reference-delay").size())
             throw std::runtime_error("Reference delay must be auto or an integer");
     }
+    if (args.count("--auto-mix-objective")) {
+        auto objective = args.at("--auto-mix-objective");
+        if (objective != "seam" && objective != "envelope")
+            throw std::runtime_error("Auto-mix objective must be seam or envelope");
+        result.auto_mix_objective =
+            objective == "seam" ? dsee::AutoMixObjective::Seam : dsee::AutoMixObjective::Envelope;
+    }
+    for (const auto &arg : args)
+        if (arg.first.rfind("--auto-mix-", 0) == 0 && !result.auto_mix)
+            throw std::runtime_error("Auto-mix controls require --mix auto");
     return result;
 }
 void report(const dsee::PostprocessResult &result, const std::string &selected,
@@ -116,16 +138,47 @@ void report(const dsee::PostprocessResult &result, const std::string &selected,
         std::cout << *result.alignment_correlation;
     else
         std::cout << "null";
-    std::cout << ",\"peak\":" << result.peak << ",\"rms\":" << result.rms << ",\"curve\":\""
+    std::cout << ",\"peak\":" << result.peak << ",\"rms\":" << result.rms
+              << ",\"effective_mix\":" << result.effective_mix << ",\"auto_mix\":";
+    if (result.auto_mix) {
+        const auto &a = *result.auto_mix;
+        std::cout << "{\"fallback\":" << (a.fallback ? "true" : "false") << ",\"reason\":\""
+                  << a.reason << "\",\"analyzed_windows\":" << a.analyzed_windows
+                  << ",\"active_windows\":" << a.active_windows
+                  << ",\"reliable_windows\":" << a.reliable_windows
+                  << ",\"fit_low_hz\":" << a.fit_low_hz << ",\"fit_high_hz\":" << a.fit_high_hz
+                  << ",\"slope_db_per_octave\":" << a.slope_db_per_octave
+                  << ",\"fit_error_db\":" << a.fit_error_db
+                  << ",\"achieved_coverage\":" << a.achieved_coverage;
+        auto optional_number = [](const char *key, const std::optional<double> &value) {
+            std::cout << ",\"" << key << "\":";
+            if (value)
+                std::cout << *value;
+            else
+                std::cout << "null";
+        };
+        optional_number("envelope_mix", a.envelope_mix);
+        optional_number("phase_limit", a.phase_limit);
+        optional_number("seam_score_before", a.seam_score_before);
+        optional_number("seam_score_after", a.seam_score_after);
+        std::cout << '}';
+    } else
+        std::cout << "null";
+    std::cout << ",\"curve\":\""
               << (options.curve == dsee::CrossoverCurve::Linear ? "linear" : "cosine")
               << "\",\"parameters\":{";
     bool first = true;
     for (const auto &control : controls) {
-        std::cout << (first ? "" : ",") << '"' << control.first.substr(2)
-                  << "\":" << options.*(control.second);
+        std::cout << (first ? "" : ",") << '"' << control.first.substr(2) << "\":";
+        if (control.first == "--mix" && options.auto_mix)
+            std::cout << "\"auto\"";
+        else
+            std::cout << options.*(control.second);
         first = false;
     }
-    std::cout << "}}";
+    std::cout << ",\"auto-mix-objective\":\""
+              << (options.auto_mix_objective == dsee::AutoMixObjective::Seam ? "seam" : "envelope")
+              << "\"}}";
 }
 
 // One anonymous PCM intermediate for the integrated offline path. It is closed

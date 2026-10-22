@@ -272,8 +272,8 @@ class WindowStream {
 
   public:
     std::vector<StereoFrame> audio;
-    WindowStream(AudioSource &input, size_t n)
-        : source(input), hop(n / 4), first(-int64_t(n / 2)), audio(n) {
+    WindowStream(AudioSource &input, size_t n, int64_t center = 0)
+        : source(input), hop(n / 4), first(center - int64_t(n / 2)), audio(n) {
         read_padded(source, first, audio.data(), audio.size());
     }
     void next() {
@@ -466,6 +466,345 @@ struct Envelope {
     }
 };
 
+// The estimator measures the actual complex crossover, including cross terms.
+// Its fixed per-track result is a signal heuristic, not a perceptual quality score.
+struct MixBand {
+    double reference = 0, linear = 0, quadratic = 0;
+};
+struct RollOff {
+    double slope = 0, anchor = 0, error = 0;
+};
+RollOff fit_rolloff(const std::vector<double> &db, const std::vector<double> &x) {
+    std::vector<double> values;
+    for (size_t i = 0; i < db.size(); ++i)
+        for (size_t j = i + 1; j < db.size(); ++j)
+            values.push_back((db[j] - db[i]) / (x[j] - x[i]));
+    RollOff fit;
+    fit.slope = median(values);
+    values.clear();
+    for (size_t i = 0; i < db.size(); ++i)
+        values.push_back(db[i] - fit.slope * x[i]);
+    fit.anchor = median(values);
+    for (size_t i = 0; i < db.size(); ++i)
+        values[i] = std::abs(db[i] - fit.anchor - fit.slope * x[i]);
+    fit.error = median(values);
+    return fit;
+}
+double upper_mix_bound(const MixBand &band, double ceiling, bool protect_overlap) {
+    double bound = 1, a = band.reference, b = band.linear, c = band.quadratic;
+    if (a + b + c > ceiling) {
+        double room = std::max(0.0, ceiling - a);
+        if (c <= 1e-30)
+            bound = b > 0 ? room / b : 1;
+        else {
+            double root = std::sqrt(std::max(0.0, b * b + 4 * c * room));
+            bound = b >= 0 ? (b + root > 0 ? 2 * room / (b + root) : 0) : (-b + root) / (2 * c);
+        }
+    }
+    // Do not cross a destructive-interference dip more than 3 dB below the
+    // original in the overlap, even if a larger mix would eventually recover.
+    if (protect_overlap && b < 0 && a > 1e-11) {
+        double room = a * (1 - std::pow(10.0, -3.0 / 10));
+        double discriminant = b * b - 4 * c * room;
+        if (discriminant > 0)
+            bound = std::min(bound, 2 * room / (-b + std::sqrt(discriminant)));
+    }
+    return std::clamp(bound, 0.0, 1.0);
+}
+
+// Score local shape independently of absolute high-band level. A straight
+// roll-off has little curvature; narrow steps and notches increase the score.
+// Per-section scores prevent a single whole-track mean hiding local problems.
+struct SeamShape {
+    size_t columns = 0;
+    std::vector<std::vector<MixBand>> sections;
+
+    double score(double mix) const {
+        std::vector<double> scores, db(columns);
+        for (const auto &section : sections) {
+            double anchor = (section[0].reference + section[1].reference) * 0.5;
+            double floor = std::max(anchor * 1e-8, 1e-30);
+            for (size_t c = 0; c < columns; ++c) {
+                const auto &b = section[c];
+                db[c] = 10 * std::log10(std::max(floor, b.reference + mix * b.linear +
+                                                            mix * mix * b.quadratic));
+            }
+            double curvature = 0, largest_step = 0;
+            for (size_t c = 1; c < columns; ++c) {
+                largest_step = std::max(largest_step, std::abs(db[c] - db[c - 1]));
+                if (c + 1 < columns) {
+                    double bend = db[c + 1] - 2 * db[c] + db[c - 1];
+                    curvature += bend * bend;
+                }
+            }
+            scores.push_back(std::sqrt(curvature / (columns - 2)) + 0.25 * largest_step);
+        }
+        double mean = std::accumulate(scores.begin(), scores.end(), 0.0) / scores.size();
+        std::sort(scores.begin(), scores.end());
+        return 0.5 * (mean + scores[size_t(std::ceil(0.9 * scores.size())) - 1]);
+    }
+};
+
+void refine_for_seam(AutoMixAnalysis &result, const std::vector<MixBand> &data, size_t bands,
+                     const std::vector<double> &energy, const std::vector<size_t> &reliable,
+                     const std::vector<double> &phase_bounds, unsigned rate,
+                     const PostprocessOptions &options) {
+    constexpr double low = 4000, width = 500;
+    size_t begin = size_t(std::max(0.0, std::floor((options.crossover_low - 1000 - low) / width)));
+    double high = std::min(rate / 2.0 - 1000, options.crossover_high + 2000);
+    size_t end = std::min(bands, size_t(std::max(0.0, std::floor((high - low) / width))));
+    if (end < begin + 5) {
+        result.reason = "seam_unavailable_used_envelope";
+        return;
+    }
+    SeamShape shape;
+    shape.columns = end - begin;
+    size_t groups = std::min<size_t>(8, reliable.size() / 8);
+    std::vector<std::vector<MixBand>> sections(groups, std::vector<MixBand>(shape.columns));
+    std::vector<double> anchors(groups);
+    std::vector<size_t> counts(groups);
+    for (size_t i = 0; i < reliable.size(); ++i) {
+        size_t t = reliable[i], g = i * groups / reliable.size();
+        ++counts[g];
+        anchors[g] += data[t * bands + begin].reference + data[t * bands + begin + 1].reference;
+        for (size_t c = 0; c < shape.columns; ++c) {
+            const auto &b = data[t * bands + begin + c];
+            auto &sum = sections[g][c];
+            sum.reference += b.reference / energy[t];
+            sum.linear += b.linear / energy[t];
+            sum.quadratic += b.quadratic / energy[t];
+        }
+    }
+    for (size_t g = 0; g < groups; ++g)
+        if (anchors[g] / counts[g] >= 1e-9)
+            shape.sections.push_back(std::move(sections[g]));
+    if (shape.sections.empty()) {
+        result.reason = "seam_unavailable_used_envelope";
+        return;
+    }
+    auto limits = phase_bounds;
+    std::sort(limits.begin(), limits.end());
+    size_t failures = size_t(std::floor((1 - options.auto_mix_coverage) * limits.size() + 1e-9));
+    result.phase_limit = limits[failures];
+    double maximum =
+        std::max(options.auto_mix_min, std::min(options.auto_mix_max, *result.phase_limit));
+    double baseline = result.selected_mix;
+    result.seam_score_before = shape.score(baseline);
+    std::vector<double> candidates{options.auto_mix_min, maximum,
+                                   std::clamp(baseline, options.auto_mix_min, maximum)};
+    for (size_t i = 0; i <= 100; ++i) {
+        double candidate = i / 100.0;
+        if (candidate >= options.auto_mix_min && candidate <= maximum)
+            candidates.push_back(candidate);
+    }
+    double best = std::numeric_limits<double>::infinity();
+    std::vector<double> scores;
+    for (double candidate : candidates) {
+        double score = shape.score(candidate);
+        scores.push_back(score);
+        best = std::min(best, score);
+    }
+    // The envelope estimate only breaks near ties; it no longer overrides a
+    // substantially smoother join. 0.02 is a score tolerance, not a gain change.
+    double distance = std::numeric_limits<double>::infinity();
+    for (size_t i = 0; i < candidates.size(); ++i)
+        if (scores[i] <= best + 0.02 && std::abs(candidates[i] - baseline) < distance) {
+            distance = std::abs(candidates[i] - baseline);
+            result.selected_mix = candidates[i];
+            result.seam_score_after = scores[i];
+        }
+    result.reason = result.selected_mix > *result.phase_limit + 1e-9
+                        ? "minimum_overrides_phase_guard"
+                        : "seam_continuity";
+}
+
+AutoMixAnalysis estimate_mix(AudioSource &processed, AudioSource &reference,
+                             unsigned original_reference_rate, const PostprocessOptions &options,
+                             const std::vector<double> &window, const Fft &fft,
+                             const Envelope *envelope) {
+    AutoMixAnalysis result;
+    result.selected_mix =
+        std::clamp(options.auto_mix_fallback, options.auto_mix_min, options.auto_mix_max);
+    unsigned rate = processed.sample_rate();
+    size_t n = window.size(), hop = n / 4;
+    if (processed.frame_count() < rate)
+        return result;
+    size_t rows = size_t(processed.frame_count() / hop + 1);
+    size_t count = std::min<size_t>(2048, rows / 8 + 1);
+    result.analyzed_windows = count;
+    constexpr double low = 4000, width = 500;
+    double high = std::min(rate / 2.0, std::max(21000.0, options.crossover_high + 12000));
+    size_t bands = size_t(std::ceil((high - low) / width));
+    std::vector<double> centers(bands), energy(count), global(bands), scratch;
+    std::vector<MixBand> data(count * bands);
+    double scale =
+        1.0 / (rate * std::inner_product(window.begin(), window.end(), window.begin(), 0.0));
+    Spectrum r(n), d(n);
+    for (size_t t = 0; t < count; ++t) {
+        size_t frame = t * (rows - 1) / (count - 1);
+        WindowStream original(reference, n, int64_t(frame * hop));
+        WindowStream changed(processed, n, int64_t(frame * hop));
+        r.analyze(original, window, fft);
+        d.analyze(changed, window, fft);
+        for (size_t k = 0; k <= n / 2; ++k) {
+            double hz = double(k) * rate / n;
+            double density = scale * (k == 0 || k == n / 2 ? 0.5 : 1.0);
+            double power = (std::norm(r.left[k]) + std::norm(r.right[k])) * density;
+            energy[t] += power * rate / n;
+            if (hz < low || hz >= high)
+                continue;
+            size_t c = size_t((hz - low) / width);
+            double crossfade =
+                transition(hz, options.crossover_low, options.crossover_high, options.curve);
+            double gain =
+                envelope
+                    ? std::pow(10.0, envelope->gain(frame, hz) *
+                                         transition(hz, options.envelope_low, options.envelope_high,
+                                                    CrossoverCurve::Cosine) /
+                                         20)
+                    : 1;
+            Complex delta_l = crossfade * (gain * d.left[k] - r.left[k]);
+            Complex delta_r = crossfade * (gain * d.right[k] - r.right[k]);
+            auto &b = data[t * bands + c];
+            // Integrate bin powers; frequency groups need no independence assumption.
+            b.reference += power * rate / n;
+            b.linear += 2 *
+                        (std::real(std::conj(r.left[k]) * delta_l) +
+                         std::real(std::conj(r.right[k]) * delta_r)) *
+                        density * rate / n;
+            b.quadratic += (std::norm(delta_l) + std::norm(delta_r)) * density * rate / n;
+        }
+    }
+    scratch = energy;
+    std::sort(scratch.begin(), scratch.end());
+    double gate = std::max(1e-7, scratch[size_t(0.8 * (count - 1))] * 1e-3);
+    std::vector<size_t> active;
+    for (size_t t = 0; t < count; ++t)
+        if (energy[t] >= gate)
+            active.push_back(t);
+    result.active_windows = active.size();
+    if (active.size() < 8) {
+        result.reason = "insufficient_active_audio";
+        return result;
+    }
+    for (size_t c = 0; c < bands; ++c) {
+        centers[c] = low + width * (c + 0.5);
+        scratch.clear();
+        for (auto t : active)
+            scratch.push_back(10 *
+                              std::log10(std::max(data[t * bands + c].reference / width, 1e-20)));
+        global[c] = median(scratch);
+    }
+    // Search downward for a populated, reasonably smooth 4 kHz fit interval.
+    // Steep codec/resampler cutoffs and the noise floor are excluded explicitly.
+    double max_fit =
+        std::min({20000.0, original_reference_rate / 2.0 - 1000, options.crossover_low + 1000});
+    size_t fit_end = 0;
+    std::vector<double> fit_db(8), x(8);
+    for (size_t end = bands; end-- > 7;) {
+        if (centers[end] > max_fit || centers[end] < 12000)
+            continue;
+        bool populated = true;
+        double power = 0;
+        for (size_t j = 0; j < 8; ++j) {
+            fit_db[j] = global[end - 7 + j];
+            x[j] = std::log2(centers[end - 7 + j] / centers[end]);
+            power += std::pow(10.0, fit_db[j] / 10) * width;
+            if (fit_db[j] < -130 || (j && fit_db[j - 1] - fit_db[j] > 10))
+                populated = false;
+        }
+        if (!populated || power < std::pow(10.0, -75.0 / 10))
+            continue;
+        auto fit = fit_rolloff(fit_db, x);
+        if (fit.slope < -60 || fit.slope > 6 || fit.error > 3)
+            continue;
+        fit_end = end;
+        result.fit_low_hz = centers[end - 7] - width / 2;
+        result.fit_high_hz = centers[end] + width / 2;
+        result.slope_db_per_octave = std::clamp(fit.slope, -48.0, 0.0);
+        result.fit_error_db = fit.error;
+        break;
+    }
+    if (!fit_end) {
+        result.reason = "unreliable_reference_envelope";
+        return result;
+    }
+    std::vector<double> bounds, phase_bounds;
+    std::vector<size_t> reliable;
+    size_t first_band = size_t(std::max(0.0, std::floor((options.crossover_low - low) / width)));
+    double margin = std::pow(10.0, options.auto_mix_margin_db / 10);
+    for (auto t : active) {
+        scratch.clear();
+        double power = 0;
+        for (size_t j = 0; j < 8; ++j) {
+            double band = data[t * bands + fit_end - 7 + j].reference;
+            power += band;
+            fit_db[j] = 10 * std::log10(std::max(band / width, 1e-20));
+            scratch.push_back(fit_db[j] - result.slope_db_per_octave * x[j]);
+        }
+        double anchor = median(scratch);
+        for (size_t j = 0; j < 8; ++j)
+            scratch[j] = std::abs(fit_db[j] - anchor - result.slope_db_per_octave * x[j]);
+        if (power < 1e-8 || median(scratch) > 6)
+            continue;
+        double bound = 1;
+        bool measured = false;
+        // About 2 kHz groups reduce sensitivity to narrow spectral notches.
+        for (size_t begin = first_band; begin < bands; begin += 4) {
+            MixBand group;
+            double ceiling = 0;
+            size_t end = std::min(begin + 4, bands);
+            for (size_t c = begin; c < end; ++c) {
+                const auto &b = data[t * bands + c];
+                group.reference += b.reference;
+                group.linear += b.linear;
+                group.quadratic += b.quadratic;
+                double prediction =
+                    std::pow(10.0, (anchor + result.slope_db_per_octave *
+                                                 std::log2(centers[c] / centers[fit_end])) /
+                                       10) *
+                    width;
+                ceiling += std::max({prediction, b.reference, 1e-11}) * margin;
+            }
+            if (std::max(group.reference, group.reference + group.linear + group.quadratic) <
+                (end - begin) * 1e-11)
+                continue;
+            measured = true;
+            bool overlap = low + width * begin < options.crossover_high;
+            bound = std::min(bound, upper_mix_bound(group, ceiling, overlap));
+        }
+        if (measured) {
+            bounds.push_back(bound);
+            reliable.push_back(t);
+            double phase_bound = 1;
+            for (size_t c = first_band; c < bands && low + c * width < options.crossover_high; ++c)
+                phase_bound = std::min(
+                    phase_bound, upper_mix_bound(data[t * bands + c],
+                                                 std::numeric_limits<double>::infinity(), true));
+            phase_bounds.push_back(phase_bound);
+        }
+    }
+    result.reliable_windows = bounds.size();
+    if (bounds.size() < 8 || bounds.size() * 4 < active.size()) {
+        result.reason = "insufficient_reliable_windows";
+        return result;
+    }
+    std::sort(bounds.begin(), bounds.end());
+    size_t failures = size_t(std::floor((1 - options.auto_mix_coverage) * bounds.size() + 1e-9));
+    result.selected_mix = std::clamp(bounds[failures], options.auto_mix_min, options.auto_mix_max);
+    result.envelope_mix = result.selected_mix;
+    result.fallback = false;
+    result.reason = result.selected_mix > bounds[failures] + 1e-9 ? "minimum_overrides_constraint"
+                                                                  : "estimated";
+    if (options.auto_mix_objective == AutoMixObjective::Seam)
+        refine_for_seam(result, data, bands, energy, reliable, phase_bounds, rate, options);
+    result.achieved_coverage =
+        double(std::count_if(bounds.begin(), bounds.end(),
+                             [&](double bound) { return bound + 1e-9 >= result.selected_mix; })) /
+        bounds.size();
+    return result;
+}
+
 class Output {
     const PcmSink &sink;
     long double squares = 0;
@@ -514,15 +853,27 @@ void PostprocessOptions::validate(unsigned output_rate, unsigned reference_rate)
             "Invalid postprocess mode");
     require(curve == CrossoverCurve::Linear || curve == CrossoverCurve::Cosine,
             "Invalid crossover curve");
+    require(auto_mix_objective == AutoMixObjective::Seam ||
+                auto_mix_objective == AutoMixObjective::Envelope,
+            "Invalid auto-mix objective");
     for (double value :
          {mix, crossover_low, crossover_high, envelope_strength, max_cut_db, fit_low, fit_high,
-          envelope_low, envelope_high, smoothing_ms, reference_gain_db, alignment_start})
+          envelope_low, envelope_high, smoothing_ms, reference_gain_db, alignment_start,
+          auto_mix_min, auto_mix_max, auto_mix_fallback, auto_mix_margin_db, auto_mix_coverage})
         require(std::isfinite(value), "Postprocessing parameters must be finite");
     require(output_rate == 48000 || output_rate == 96000 || output_rate == 192000,
             "Processed audio must be 48, 96 or 192 kHz");
     require(mix >= 0 && mix <= 1 && envelope_strength >= 0 && envelope_strength <= 1,
             "Mix and envelope strength must be between 0 and 1");
     require(max_cut_db >= 0 && max_cut_db <= 60, "Maximum attenuation must be 0..60 dB");
+    require(auto_mix_min >= 0 && auto_mix_min <= auto_mix_max && auto_mix_max <= 1 &&
+                auto_mix_fallback >= 0 && auto_mix_fallback <= 1,
+            "Auto-mix bounds and fallback must be 0..1 with min <= max");
+    require(auto_mix_margin_db >= 0 && auto_mix_margin_db <= 12 && auto_mix_coverage >= 0.5 &&
+                auto_mix_coverage <= 1,
+            "Auto-mix margin must be 0..12 dB and coverage 0.5..1");
+    require(!auto_mix || (mixes() && crossover_low >= 12000),
+            "Auto mix requires mix/combined mode and crossover-low at least 12000 Hz");
     require(smoothing_ms >= 0 && smoothing_ms <= 5000, "Smoothing must be 0..5000 ms");
     require(reference_gain_db >= -120 && reference_gain_db <= 24,
             "Reference gain must be -120..24 dB");
@@ -561,6 +912,14 @@ PostprocessResult postprocess(AudioSource &processed, AudioSource *reference,
     require(processed.frame_count() < limit && (!reference || reference->frame_count() < limit),
             "Audio is too long for postprocessing");
     Output output(sink);
+    output.result.effective_mix = options.mix;
+    if (options.auto_mix) {
+        output.result.auto_mix.emplace();
+        output.result.auto_mix->reason = "empty_audio";
+        output.result.auto_mix->selected_mix =
+            std::clamp(options.auto_mix_fallback, options.auto_mix_min, options.auto_mix_max);
+        output.result.effective_mix = output.result.auto_mix->selected_mix;
+    }
     uint64_t length = processed.frame_count();
     if (!length)
         return output.result;
@@ -592,14 +951,20 @@ PostprocessResult postprocess(AudioSource &processed, AudioSource *reference,
     std::optional<Envelope> envelope;
     if (options.adapts())
         envelope.emplace(processed, aligned, options, window, fft);
+    if (options.auto_mix) {
+        output.result.auto_mix = estimate_mix(processed, aligned, reference->sample_rate(), options,
+                                              window, fft, envelope ? &*envelope : nullptr);
+        output.result.effective_mix = output.result.auto_mix->selected_mix;
+    }
     WindowStream input(processed, n), original(aligned, n);
     Spectrum a(n), b(n);
     std::vector<StereoFrame> accumulation(n), block(hop);
     std::vector<double> weight(n), mixed(n / 2 + 1), taper(n / 2 + 1);
     for (size_t k = 0; k <= n / 2; ++k) {
         double hz = double(k) * rate / n;
-        mixed[k] = options.mixes() ? options.mix * transition(hz, options.crossover_low,
-                                                              options.crossover_high, options.curve)
+        mixed[k] = options.mixes() ? output.result.effective_mix *
+                                         transition(hz, options.crossover_low,
+                                                    options.crossover_high, options.curve)
                                    : 1;
         taper[k] =
             transition(hz, options.envelope_low, options.envelope_high, CrossoverCurve::Cosine);

@@ -62,15 +62,20 @@ with tempfile.TemporaryDirectory(prefix='dsee-integration-') as tmp:
         base=[exe,'process','--assets',a.assets,'--input',str(root/'noise.wav'),
               '--output-rate',str(rate)]
         subprocess.run(base+['--output',str(root/'native.wav')],check=True,capture_output=True)
-        for mode in ('none','mix','adaptive','combined'):
+        for mode,automatic,objective in [('none',False,'seam'),('mix',False,'seam'),
+                                         ('adaptive',False,'seam'),('combined',False,'seam'),
+                                         ('mix',True,'seam'),('combined',True,'seam'),
+                                         ('mix',True,'envelope'),('combined',True,'envelope')]:
+            controls=['--mix','auto','--auto-mix-objective',objective] if automatic else []
             integrated=subprocess.run(base+['--output',str(root/'integrated.wav'),
-                                            '--postprocess',mode],check=True,capture_output=True,text=True)
+                                            '--postprocess',mode]+controls,check=True,capture_output=True,text=True)
             standalone=subprocess.run([exe,'postprocess','--input',str(root/'native.wav'),
                                        '--reference',str(root/'noise.wav'),'--output',str(root/'standalone.wav'),
-                                       '--mode',mode],check=True,capture_output=True,text=True)
+                                       '--mode',mode]+controls,check=True,capture_output=True,text=True)
             assert (root/'integrated.wav').read_bytes()==(root/'standalone.wav').read_bytes(),(rate,mode)
             stats=json.loads(standalone.stdout)
-            postprocess_results.append({'rate':rate,'mode':mode,'integrated_matches':True,
+            postprocess_results.append({'rate':rate,'mode':mode,'automatic_mix':automatic,
+                                        'auto_mix_objective':objective,'integrated_matches':True,
                                         'output_frames':stats['output_frames'],
                                         'postprocess':stats['postprocess']})
             (root/'integrated.wav').unlink();(root/'standalone.wav').unlink()

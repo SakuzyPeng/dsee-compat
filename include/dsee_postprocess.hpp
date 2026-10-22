@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <string>
 
 namespace dsee {
 
@@ -24,10 +25,15 @@ class AudioSource {
 
 enum class PostprocessMode { None, Adaptive, Mix, Combined };
 enum class CrossoverCurve { Linear, Cosine };
+enum class AutoMixObjective { Seam, Envelope };
 
 struct PostprocessOptions {
     PostprocessMode mode = PostprocessMode::None;
     double mix = 0.5;
+    bool auto_mix = false;
+    AutoMixObjective auto_mix_objective = AutoMixObjective::Seam;
+    double auto_mix_min = 0, auto_mix_max = 1, auto_mix_fallback = 0.5;
+    double auto_mix_margin_db = 2, auto_mix_coverage = 0.9;
     CrossoverCurve curve = CrossoverCurve::Cosine;
     double crossover_low = 18000, crossover_high = 22000;
     double envelope_strength = 1, max_cut_db = 12;
@@ -44,11 +50,25 @@ struct PostprocessOptions {
     void validate(unsigned output_rate, unsigned reference_rate = 0) const;
 };
 
+struct AutoMixAnalysis {
+    double selected_mix = 0.5;
+    bool fallback = true;
+    std::string reason = "insufficient_audio";
+    size_t analyzed_windows = 0, active_windows = 0, reliable_windows = 0;
+    double fit_low_hz = 0, fit_high_hz = 0;
+    double slope_db_per_octave = 0, fit_error_db = 0;
+    double achieved_coverage = 0;
+    std::optional<double> envelope_mix, phase_limit;
+    std::optional<double> seam_score_before, seam_score_after;
+};
+
 struct PostprocessResult {
     uint64_t frames = 0;
     int64_t reference_delay = 0;
     std::optional<double> alignment_correlation;
     double peak = 0, rms = 0; // Normalized sample peak and RMS; zero for silence.
+    double effective_mix = 0.5;
+    std::optional<AutoMixAnalysis> auto_mix;
 };
 
 using PcmSink = std::function<void(const int32_t *interleaved, size_t frames)>;

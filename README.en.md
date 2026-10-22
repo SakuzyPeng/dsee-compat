@@ -164,6 +164,7 @@ build/dsee-compat postprocess \
 ```
 
 - `--mode adaptive|mix|combined|none` selects individual effects, both, or exact bypass; the integrated command uses `--postprocess`.
+- `--mix auto` experimentally selects one track-wide weight prioritizing crossover continuity; `--auto-mix-objective envelope` retains the original envelope policy. JSON reports the decision.
 - `--mix 0.5` caps processed amplitude at 50%; `--mix 1` completes a 100%-to-0% reference / 0%-to-100% processed crossover.
 - Crossover frequencies, `linear|cosine` shape, envelope strength, attenuation limit and time smoothing are adjustable.
 - Delay is measured automatically; use `--reference-delay` in output-rate samples for short/silent audio or periodic tones.

@@ -37,7 +37,7 @@ PCM32 samples exactly; PCM16 is represented exactly in PCM32. Zero-strength/zero
 also bypasses processing. A mode that mixes always requires a reference, including `--mix 0`.
 
 Both commands return a JSON summary on stdout. Applied processing includes frame count, effective
-reference delay, automatic correlation (or null), linear sample peak/RMS, curve and numeric controls.
+reference delay, automatic correlation (or null), linear sample peak/RMS, curve and controls, including the effective mix and any automatic selection diagnostics.
 Sample peaks and RMS are normalized to full scale. Empty audio reports zero peak/RMS.
 
 ## Formats
@@ -59,7 +59,12 @@ actual input WAV as reference is the most reproducible choice.
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `--mode` / `--postprocess` | `mix` / `none` | `none`, `adaptive`, `mix`, `combined` |
-| `--mix` | `0.5` | Maximum processed amplitude weight, 0..1 |
+| `--mix` | `0.5` | Fixed processed amplitude weight, 0..1, or `auto` |
+| `--auto-mix-objective` | `seam` | Prefer local continuity, or `envelope` for the original upper-bound policy |
+| `--auto-mix-min` / `--auto-mix-max` | `0` / `1` | Bounds for automatic selection |
+| `--auto-mix-fallback` | `0.5` | Fallback when evidence is insufficient, clamped to bounds |
+| `--auto-mix-margin-db` | `2` | Allowed band-power excess over reference/envelope, 0..12 dB |
+| `--auto-mix-coverage` | `0.9` | Required fraction of reliable windows meeting constraints, 0.5..1 |
 | `--curve` | `cosine` | `linear` or complementary raised cosine |
 | `--crossover-low` / `--crossover-high` | `18000` / `22000` | Mixing transition, Hz |
 | `--envelope-strength` | `1` | Attenuation scale in dB, 0..1 |
@@ -98,6 +103,86 @@ processed branch. `--mix 0` selects the aligned reference, while `--mode none` p
 These are amplitude weights, not power percentages. Common delay correction does not compensate for
 arbitrary frequency-dependent phase differences. In `combined` mode the adaptive gain is applied to
 the processed branch before mixing, in one synthesis pass.
+
+### Automatic per-track mix (experimental)
+
+Use `--mix auto` with `mix` or `combined` mode in either CLI entry point:
+
+```sh
+build/dsee-compat postprocess --input dsee.wav --reference input-48k.wav \
+  --output automatic.wav --mode mix --mix auto \
+  --auto-mix-min 0 --auto-mix-max 1 --auto-mix-margin-db 2
+```
+
+The result is one fixed amplitude weight for the entire track, shared by both channels. The default
+`seam` objective prioritizes crossover continuity. `--auto-mix-objective envelope` reproduces the
+initial envelope-limited selector. The decision is
+estimated after reference gain/delay correction and, in combined mode, after the configured adaptive
+envelope. Ordinary numeric `--mix` follows the original path. Automatic controls require `--mix auto`;
+automatic mixing currently requires a crossover starting at 12 kHz or higher.
+
+The estimator samples up to 2,048 evenly distributed STFT windows (roughly every eight hops for shorter
+files). Reference windows below -70 dBFS or 30 dB below the 80th-percentile window power are excluded.
+At least one second of audio and eight active windows are required. The windows contain the full
+complex spectra of both channels.
+
+A 4 kHz reference fitting interval is searched downward on the 500 Hz grid. Its upper band center
+cannot exceed the lowest of 20 kHz, reference Nyquist minus 1 kHz, and crossover start plus 1 kHz.
+Its upper center must reach at least 12 kHz. Adjacent downward jumps above 10 dB, band densities below
+-130 dBFS/Hz, weak fit energy and large fitting residuals are rejected. This moves the fit below sharp
+bandwidth cutoffs where enough evidence exists. A median pairwise slope estimates roll-off; accepted
+raw slopes are -60..6 dB/octave and extrapolation clamps them to -48..0 dB/octave. The fit is a signal
+heuristic, not knowledge of the missing high-resolution recording.
+
+The track slope is combined with a per-window anchor. Windows with fit-band energy below -80 dBFS or
+median fitting error above 6 dB are excluded. At least eight reliable windows and one quarter of the
+active windows must remain. Analysis covers approximately 2 kHz groups from the crossover start to
+12 kHz beyond its upper endpoint, limited by output Nyquist. Upper targets use the greater of the
+reference band power and extrapolated envelope, plus the configured margin, with a -110 dBFS floor
+per 500 Hz band. Unpopulated groups are ignored.
+
+For each group, mixing power is evaluated as a quadratic in the candidate weight using the actual
+complex reference and processed spectra. Cross-power terms therefore include phase cancellation.
+The `envelope` objective selects the greatest admissible weight that meets the upper energy target
+and avoids passing through an overlap dip more than 3 dB below the reference. A lower quantile of
+window limits provides the configured statistical coverage. This decision is also retained as the
+baseline for `seam` mode.
+
+The default `seam` objective then compares the actual mixed band powers at 500 Hz resolution from
+1 kHz below the crossover start to 2 kHz above its end (ending at least 1 kHz below output Nyquist).
+Reliable windows are split chronologically into up to eight sections, each containing at least eight
+windows. Powers are normalized by reference window energy before aggregation. Sections without a
+usable reference anchor immediately below the crossover are excluded; if no section remains, the
+envelope result is retained with `seam_unavailable_used_envelope`.
+
+For each section, the shape score is the RMS second difference of log band power plus one quarter of
+the largest adjacent-band step. The track score averages the mean and 90th-percentile section scores.
+A straight spectral slope is allowed; abrupt corners and notches are penalized. A separate 500 Hz
+phase-cancellation guard limits candidates that would pass through a dip more than 3 dB below the
+reference, using the configured window coverage. Candidate weights include the envelope baseline,
+user bounds, phase limit, and a 0.01 grid. Among candidates within 0.02 score units of the best, the one
+closest to the envelope baseline is selected. This uses the envelope to break near ties rather than
+forcing a visibly steeper crossover to satisfy a distant high-band level prediction.
+
+JSON reports `effective_mix` and an `auto_mix` record: fallback/reason, analyzed/active/reliable window
+counts, fit interval, slope, fitting error and `achieved_coverage`. That coverage always describes the
+original envelope constraint and may be below the requested value when seam continuity takes priority.
+Additional optional fields are `envelope_mix`, `phase_limit`, `seam_score_before` and `seam_score_after`.
+The latter compare the baseline and selected mix under the same shape score, not a perceptual score.
+A normal seam selection reports `seam_continuity`. An explicit minimum can override a guard and is
+reported as `minimum_overrides_constraint` or `minimum_overrides_phase_guard`.
+
+Short, silent, narrow-band or irregular material may instead report a fallback. Automatic delay
+alignment has its own requirements; an explicit delay is needed for silence/short clips even when mix
+selection will fall back. Empty audio reports the configured fallback without analysis. Numeric
+`--mix` remains a fixed, manually chosen weight, and the estimator does not restore loudness.
+
+The existing `--fit-low`, `--fit-high` and envelope controls still govern adaptive attenuation, while
+automatic mixing searches its own interval. In C++, set `PostprocessOptions::auto_mix`; inspect
+`PostprocessResult::effective_mix` and its optional `AutoMixAnalysis`. Select `AutoMixObjective::Seam`
+(default) or `AutoMixObjective::Envelope` in `PostprocessOptions`. Parameter defaults are trial
+settings to calibrate by loudness-matched listening. Loudness restoration/limiting remains a separate
+operation, and this option does not change the crossover endpoints automatically.
 
 ### Adaptive envelope
 

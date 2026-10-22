@@ -148,6 +148,7 @@ build/dsee-compat postprocess \
 ```
 
 - `--mode adaptive|mix|combined|none`：单独包络、单独混合、叠加或原样输出；集成入口用 `--postprocess` 选择。
+- `--mix auto`：实验性的整曲自动比例，优先优化交界连续性；`--auto-mix-objective envelope` 可使用原包络策略，JSON 会报告选择依据。
 - `--mix 0.5`：高频最多混入 50% 处理信号；`--mix 1`：原信号降至 0%，处理信号升至 100%。
 - `--curve linear|cosine`、交接频率、包络强度、最大衰减和时间平滑均可调。
 - 自动估计延迟；短音频、静音和周期纯音可用 `--reference-delay` 指定输出采样率下的样本数。
