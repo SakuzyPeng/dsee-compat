@@ -1,22 +1,69 @@
 # dsee-compat
 
-Independent C++17 compatibility runtime and WAV CLI for running one supported Sony Android audio library on Apple Silicon macOS. The runtime executes the original ARM64 instructions after in-memory ELF relocation and narrowly scoped ABI adaptation.
+**简体中文** · [English](README.en.md)
 
-**No Sony code, binaries, models, parameter files, firmware downloads, or adapted images are distributed here.** Build the tool without those resources; provide your own resources locally when running it. This is not a Sony product or an officially supported port. MIT covers this repository's own code only and does not grant rights to Sony software. See [distribution boundaries](docs/DISTRIBUTION.md).
+一个让**一款受支持的 Sony Android 音频库在 Apple Silicon macOS 上运行**的独立兼容运行时，附带 WAV 命令行工具。
+它用 C++17 编写，在内存中完成 ELF 重定位，并只做范围很窄的 ABI 适配，然后直接执行原始的 ARM64 指令。
 
-## Status and supported input
+> **本仓库不分发任何 Sony 代码、二进制、模型、参数文件、固件下载或改编过的镜像。** 构建时不需要这些资源；
+> 运行时请在本地提供你自己的资源。这不是 Sony 产品，也不是官方支持的移植。MIT 只覆盖本仓库自己的代码，
+> 不授予任何 Sony 软件的权利。详见[分发边界](docs/DISTRIBUTION.md)。
 
-- Tested on Apple M4 Pro / macOS 27.0.1. Other Apple Silicon systems have not yet been validated.
-- Supports the inspected Xperia 5 V firmware `67.1.A.2.229` by exact resource hashes.
-- Input: RIFF/WAVE format tag 1, 48 kHz, stereo, signed PCM16.
-- Output: stereo signed PCM32 at 48, 96 (default), or 192 kHz.
-- Source metadata profiles: `pcm` (default), `aac128`, `mp3128`. These select algorithm parameters; the CLI does not decode AAC/MP3 or infer the original codec of a WAV file.
-- Processing preserves algorithm latency and the zero-fed tail. Output can be longer than input. No automatic alignment, normalization, or resampling of unsupported input is performed.
-- No RF64, WAVE extensible, 24-bit, float, 44.1 kHz, GUI, Audio Unit, concurrent instances, or multi-threaded processing in this version.
+本文只讲上手和构建。**C API 的完整约定见 [API 文档](docs/API.md)，测试结果和性能数据见[验证记录](docs/VALIDATION.md)。**
 
-## Build without Sony resources
+## 目录
 
-Requires Apple Silicon macOS, Xcode Command Line Tools, and CMake. Python 3 is needed only for tests and repository checks. No packages are downloaded by the build.
+- [能用它做什么](#能用它做什么)
+- [支持范围](#支持范围)
+- [从源码构建](#从源码构建)
+- [准备外部资源目录](#准备外部资源目录)
+- [上手三步](#上手三步)
+- [处理流程](#处理流程)
+- [C API](#c-api)
+- [常见问题](#常见问题)
+- [已知限制](#已知限制)
+- [测试](#测试)
+- [文档](#文档)
+- [许可证](#许可证)
+
+## 能用它做什么
+
+- **在 Mac 上处理 WAV**：把 48 kHz 立体声 PCM16 输入送进原始算法，得到 48 / 96 / 192 kHz 的立体声 PCM32 输出。
+- **检查资源是否受支持**：`inspect` 只校验库和三套参数的大小与 SHA-256，不执行任何固件代码。
+- **嵌入自己的程序**：静态库 `libdsee_compat.a` 加一个纯 C 头文件，按流式接口逐块处理。
+- **不碰原始文件**：资源只读入内存校验并使用，不复制、不缓存、不修改，也不写任何补丁后的二进制。
+- **安全地写输出**：不覆盖已有文件，先写同目录临时文件，完成后再原子发布；失败时自动清理。
+
+## 支持范围
+
+| 项目 | 支持 |
+| --- | --- |
+| 主机 | Apple Silicon macOS（已在 Apple M4 Pro / macOS 27.0.1 上测试，其他机型尚未验证） |
+| 固件 | Xperia 5 V `67.1.A.2.229`，按资源精确哈希识别 |
+| 输入 | RIFF/WAVE，格式标签 1，48 kHz，立体声，有符号 PCM16 |
+| 输出 | 立体声有符号 PCM32，48、96（默认）或 192 kHz |
+| 源元数据配置 | `pcm`（默认）、`aac128`、`mp3128` |
+
+源元数据配置只用来选择算法参数；CLI **不解码** AAC/MP3，也不会推断 WAV 文件原来是什么编码。
+
+| | macOS（Apple Silicon） | Intel Mac | Linux / Windows |
+| --- | --- | --- | --- |
+| 构建 | ✅ | ❌ | ❌ |
+| 运行 | ✅ | ❌ | ❌ |
+
+CMake 在非 Apple Silicon macOS 上会直接报错停止。
+
+## 从源码构建
+
+### 需要准备
+
+- **Apple Silicon macOS** 与 **Xcode Command Line Tools**。
+- **CMake 3.20+**。
+- **Python 3**——仅测试和仓库检查需要。
+
+构建过程不下载任何依赖包，也不需要 Sony 资源。
+
+### 构建与测试
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -24,11 +71,20 @@ cmake --build build -j 4
 ctest --test-dir build --output-on-failure
 ```
 
-Use `-DBUILD_TESTING=OFF` to build the CLI and static library without Python. Outputs are `build/dsee-compat` and `build/libdsee_compat.a`. `cmake --install build --prefix <destination>` installs the CLI, static library, and C header.
+产物是 `build/dsee-compat`（CLI）和 `build/libdsee_compat.a`（静态库）。
+加 `-DBUILD_TESTING=OFF` 可以只构建 CLI 和静态库，不需要 Python。
 
-## External resource directory
+### 安装
 
-Pass a directory containing this layout; do not place the resources in this repository:
+```sh
+cmake --install build --prefix <目标目录>
+```
+
+会安装 CLI、静态库和 C 头文件。
+
+## 准备外部资源目录
+
+准备一个下面这种布局的目录，**不要放进本仓库**：
 
 ```text
 <resource-root>/
@@ -39,30 +95,99 @@ Pass a directory containing this layout; do not place the resources in this repo
   vendor/etc/DrangeparaMP3_128.bin
 ```
 
-`inspect` checks the library and all three profiles. `process` needs only the library, DSX parameters and the selected Drange file. Every selected file must match its supported size and SHA-256. Symlinks escaping the resource root are rejected. The verified bytes are used directly in memory, so files are not reopened during processing. The original files are not changed.
+- `inspect` 检查库和全部三套配置；`process` 只需要库、DSX 参数和所选配置对应的 Drange 文件。
+- 每个用到的文件都必须与受支持的大小和 SHA-256 完全一致；未知资源会在执行任何原生代码之前被拒绝。
+- 指向资源根目录以外的符号链接会被拒绝。
+- 校验过的字节直接在内存中使用，处理期间不会重新打开文件；原始文件不会被改动。
 
-```sh
-build/dsee-compat inspect --assets /path/to/resource-root
-build/dsee-compat process --assets /path/to/resource-root \
-  --input input.wav --output output.wav \
-  --output-rate 96000 --source-profile pcm
-```
+## 上手三步
 
-Input is streamed in small buffers. The final partial block is zero-filled to 1024 input frames, then zero blocks are fed until four consecutive blocks produce all-zero output. Draining is limited to 48 extra zero blocks; failure to settle is an error, not a silently truncated result. Empty input produces an empty WAV. The JSON summary reports input, padding, output frames, and elapsed time including output I/O.
+1. 按上一节准备好资源目录。
+2. 检查资源是否受支持：
 
-The CLI refuses existing outputs, same input/output paths and results that may exceed the RIFF size limit. It creates a temporary file beside the destination, then publishes the completed file atomically without replacing an existing destination. Failed conversion removes its temporary output.
+   ```sh
+   build/dsee-compat inspect --assets /path/to/resource-root
+   ```
+
+   成功时输出一行 JSON，列出固件版本和可用配置。
+
+3. 处理一个 WAV：
+
+   ```sh
+   build/dsee-compat process --assets /path/to/resource-root \
+     --input input.wav --output output.wav \
+     --output-rate 96000 --source-profile pcm
+   ```
+
+   完成后输出一行 JSON 摘要：输入帧数、填充帧数、输出帧数、采样率、配置，以及包含输出 I/O 在内的耗时。
+
+`build/dsee-compat --help` 查看用法，`--version` 查看版本。
+
+## 处理流程
+
+- 输入按小缓冲区流式读取。
+- 最后不满一块的输入用零补齐到 1024 输入帧。
+- 之后持续送入零块，直到连续四块输出全为零为止；排空最多额外 48 个零块，**排空不了就报错**，不会悄悄截断结果。
+- 保留算法延迟和零输入产生的尾部，因此**输出可能比输入长**。不做自动对齐、归一化，也不会为不支持的输入重采样。
+- 空输入得到一个空 WAV。
 
 ## C API
 
-Include `dsee_compat.h`, link `libdsee_compat.a` and the C++ standard library. The header is valid C. See [API contract](docs/API.md).
+包含 `dsee_compat.h`，链接 `libdsee_compat.a` 和 C++ 标准库。头文件是合法的 C。
 
-`dsee_inspect` → `dsee_create` → repeated `dsee_process` → repeated `dsee_finish` → `dsee_destroy`.
+```text
+dsee_inspect → dsee_create → 多次 dsee_process → 多次 dsee_finish → dsee_destroy
+```
 
-There is one active instance per process. Calls must be serialized; overlapping calls and second instances return `DSEE_BUSY`. Counts and capacities are stereo frames, not individual samples. Normal validation and native-shim failures are returned as statuses. This library executes a hash-pinned foreign binary in-process; it is not a sandbox and cannot promise recovery from arbitrary native faults or ABI changes.
+- 每个进程同时只能有一个活动实例；调用必须串行，重叠调用和第二个实例返回 `DSEE_BUSY`。
+- 计数和容量都以**立体声帧**为单位，不是单个采样。
+- 常规校验错误和原生适配层的失败都以状态码返回，错误文本由 `dsee_last_error()` 给出。
+- 本库在进程内执行一个按哈希锁定的外部二进制，**它不是沙箱**，无法保证从任意原生崩溃或 ABI 变化中恢复。
 
-## Optional local integration tests
+完整的生命周期、缓冲区要求和错误语义见 [API 文档](docs/API.md)。
 
-The default tests use self-generated ELF/WAV fixtures and need no Sony resources. For local native tests:
+## 常见问题
+
+**为什么提示资源不受支持？**
+每个文件都按大小和 SHA-256 精确比对，只认 `67.1.A.2.229` 这一套资源。其他固件版本、修改过的文件，
+哪怕只改了一个字节，都会在执行任何代码之前被拒绝。先用 `inspect` 确认资源目录布局和文件是否正确。
+
+**我的 WAV 为什么打不开？**
+输入只接受格式标签 1、48 kHz、立体声、16 位整数 PCM。44.1 kHz、24 位、浮点、RF64 和 WAVE extensible 都不支持，
+也不会自动转换。请先用你自己的工具转换成 48 kHz 立体声 PCM16。
+
+**为什么输出比输入长？**
+算法有延迟，处理结束时还会送入零块把尾部排空，这些输出都保留下来，不做裁剪或对齐。
+JSON 摘要里的 `padding_frames` 是补进去的零输入帧数。
+
+**`aac128` / `mp3128` 是解码 AAC/MP3 吗？**
+不是。它们只是告诉算法源素材原本是什么编码，从而选用对应的 Drange 参数；输入仍然必须是 PCM16 WAV。
+
+**为什么不覆盖输出文件？**
+这是有意的。目标文件已存在、输入输出是同一路径，或结果可能超过 RIFF 大小上限时，CLI 都会拒绝。
+它先写同目录临时文件，完成后再原子发布，不会替换已有文件；转换失败会删除临时文件。
+
+**能同时开多个实例或多线程处理吗？**
+当前版本不行。每个进程只允许一个活动实例，并发调用返回 `DSEE_BUSY`，可以等另一个调用完成后重试。
+
+## 已知限制
+
+- **只在 Apple M4 Pro / macOS 27.0.1 上测试过**，其他 Apple Silicon 机型、其他固件版本都未验证。
+- **没有拿 Xperia 真机的输出做过比对**：目前的一致性只针对本地研究用的原始 wrapper 参考结果。
+- 不支持 RF64、WAVE extensible、24 位、浮点和 44.1 kHz 输入。
+- 没有 GUI、没有 Audio Unit，不支持多实例并发或多线程处理。
+- 不是沙箱：任意原生段错误和主机内存耗尽不在错误处理保证之内。
+
+## 测试
+
+### 默认测试（不需要 Sony 资源）
+
+`ctest` 使用自己生成的 ELF/WAV 夹具，覆盖 ELF 范围与溢出拒绝、RELA/APS2/RELR 解码、WAV 解析、
+原子输出、CLI 错误、C 头文件链接和 API 错误。
+
+### 可选的本地集成测试
+
+在本地有外部资源时运行：
 
 ```sh
 build/api_test /path/to/resource-root
@@ -73,14 +198,29 @@ python3 tests/integration.py --exe build/dsee-compat \
   --report build/integration.json
 ```
 
-The reference-results argument is an external JSON record of original-wrapper synthetic fixtures; it is not distributed here. The script checks existing fixture PCM hashes against the output prefix before the new CLI's tail. Test audio and corrupted-resource fixtures are generated temporarily and removed.
+`--reference-results` 是外部保存的原始 wrapper 合成夹具记录，本仓库不分发。脚本先用已有夹具的 PCM 哈希比对
+输出前缀，再检查新 CLI 产生的尾部。测试音频和损坏资源夹具都临时生成、用完删除。
+**不要把这些资源上传到托管 CI。**
 
-Current local results: 36 original-wrapper reference matches, nine profile/rate tail comparisons with longer zero input, fragmented input equivalence, concurrent-call rejection, 200 instance lifecycles, and a 5,000-block stream. **Xperia hardware output has not been captured for comparison.** See [validation record](docs/VALIDATION.md).
+当前本地结果：36 项原始 wrapper 参考结果一致、9 项配置/采样率组合的尾部比对、分片输入等价、并发调用拒绝、
+200 次实例生命周期，以及一段 5,000 块的流。详见[验证记录](docs/VALIDATION.md)。
 
-## Repository checks
+### 仓库检查
 
 ```sh
 python3 tools/check_distribution.py
 ```
 
-This checks staged content and all reachable commit trees against the source-only path policy and binary restrictions. Review the staged diff too. The private repository is an implementation workspace, not a legal determination that cross-device use is permitted.
+它按只含源码的路径策略和二进制限制，检查暂存内容和所有可达提交树。提交前也请自己检查实际的暂存 diff。
+检查通过**不等于**法律上允许跨设备使用。
+
+## 文档
+
+[C API 约定](docs/API.md) ·
+[验证记录](docs/VALIDATION.md) ·
+[分发边界与来源说明](docs/DISTRIBUTION.md)
+
+## 许可证
+
+本仓库自己的代码和文档采用 [MIT License](LICENSE)。它不授予 Sony 或其他第三方程序、模型权重、参数或商标的任何权利。
+你需要自行提供合法取得的文件，并自行确认适用的软件许可和当地互操作性/著作权规则，详见[分发边界](docs/DISTRIBUTION.md)。
