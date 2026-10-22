@@ -1,0 +1,17 @@
+/build*/
+/local/
+__pycache__/
+*.pyc
+.DS_Store
+*.so
+*.bin
+*.i64
+*.id0
+*.id1
+*.id2
+*.nam
+*.til
+*.apk
+*.dex
+*.wav
+*.s32
