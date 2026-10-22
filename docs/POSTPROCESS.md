@@ -37,7 +37,11 @@ PCM32 samples exactly; PCM16 is represented exactly in PCM32. Zero-strength/zero
 also bypasses processing. A mode that mixes always requires a reference, including `--mix 0`.
 
 Both commands return a JSON summary on stdout. Applied processing includes frame count, effective
-reference delay, automatic correlation (or null), linear sample peak/RMS, curve and controls, including the effective mix and any automatic selection diagnostics.
+reference delay, automatic correlation (or null), linear sample peak/RMS, curve and controls,
+including the effective mix and any automatic selection diagnostics. `effective_mix` is the maximum
+processed branch weight before adaptive gain: it is always `1` in `none` and `adaptive` modes,
+including bypass and empty audio, and the fixed or automatically selected weight in `mix` and
+`combined` modes. `parameters.mix` retains the requested control value even when that mode ignores it.
 Sample peaks and RMS are normalized to full scale. Empty audio reports zero peak/RMS.
 
 ## Formats

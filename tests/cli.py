@@ -55,6 +55,20 @@ with tempfile.TemporaryDirectory(prefix='dsee-cli-') as tmp:
         assert w.readframes(w.getnframes())==original
     wav('empty.wav',pcm=b'')
     run('postprocess','--input','empty.wav','--output','empty-out.wav','--mode','none',success=True)
+    # Non-mixing modes use the processed branch even when the requested mix is zero.
+    report_pcm=wav('report.wav',pcm=struct.pack('<ii',268435456,-268435456)*4096)
+    wav('silent-reference.wav',pcm=b'\0'*len(report_pcm))
+    for mode,strength in [('none','1'),('adaptive','1'),('adaptive','0')]:
+        for source,expected in [('report.wav',report_pcm),('empty.wav',b'')]:
+            destination=f'report-{mode}-{strength}-{source}'
+            result=run('postprocess','--input',source,'--reference','silent-reference.wav',
+                       '--output',destination,'--mode',mode,'--mix','0',
+                       '--envelope-strength',strength,'--reference-delay','0',success=True)
+            analysis=json.loads(result.stdout)['postprocess']
+            assert analysis['effective_mix']==1 and analysis['auto_mix'] is None
+            assert analysis['parameters']['mix']==0
+            with wave.open(str(root/destination),'rb') as w:
+                assert w.readframes(w.getnframes())==expected
     wav('pcm16.wav',rate=44100,width=2,pcm=struct.pack('<hhhh',123,-456,789,-1000))
     run('postprocess','--input','pcm32.wav','--reference','pcm16.wav','--output','resampled.wav',
         '--mode','mix','--mix','0','--reference-delay','0',success=True)

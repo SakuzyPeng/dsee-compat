@@ -67,7 +67,8 @@ struct PostprocessResult {
     int64_t reference_delay = 0;
     std::optional<double> alignment_correlation;
     double peak = 0, rms = 0; // Normalized sample peak and RMS; zero for silence.
-    double effective_mix = 0.5;
+    // Maximum processed branch weight, before adaptive gain; 1 in None/Adaptive.
+    double effective_mix = 1;
     std::optional<AutoMixAnalysis> auto_mix;
 };
 

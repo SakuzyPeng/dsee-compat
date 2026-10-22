@@ -912,7 +912,7 @@ PostprocessResult postprocess(AudioSource &processed, AudioSource *reference,
     require(processed.frame_count() < limit && (!reference || reference->frame_count() < limit),
             "Audio is too long for postprocessing");
     Output output(sink);
-    output.result.effective_mix = options.mix;
+    output.result.effective_mix = options.mixes() ? options.mix : 1;
     if (options.auto_mix) {
         output.result.auto_mix.emplace();
         output.result.auto_mix->reason = "empty_audio";
