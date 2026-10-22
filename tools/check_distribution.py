@@ -6,7 +6,7 @@ import subprocess
 import sys
 
 ROOT=pathlib.Path(__file__).resolve().parents[1]
-TOP={'.gitignore','.clang-format','CMakeLists.txt','LICENSE','README.md','AGENTS.md'}
+TOP={'.gitignore','.clang-format','CMakeLists.txt','LICENSE','README.md','AGENTS.md','CLAUDE.md'}
 DIRS={'include','src','tests','tools','docs'}
 EXTS={'.h','.hpp','.c','.cpp','.py','.md','.sh','.txt','.yml','.yaml'}
 DENIED={'image_metadata.h','image.bin'}
