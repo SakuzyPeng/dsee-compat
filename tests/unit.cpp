@@ -1,11 +1,18 @@
+#include "platform.hpp"
+#ifdef _WIN32
+#include <windows.h>
+
+#include <io.h>
+#include <winioctl.h>
+#endif
 #include "elf.hpp"
 #include "wav.hpp"
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
-#include <unistd.h>
 #include <vector>
 using Bytes = std::vector<uint8_t>;
 void check(bool v) {
@@ -106,8 +113,10 @@ int main() {
             put(c, 176, 16, 8);
             dsee::Elf x(c);
             check(x.relocs.size() == 1 && x.relocs[0].addend == 16);
+#ifdef DSEE_TEST_NATIVE_IMAGE
             dsee::Image image(
                 x, [](auto &) -> void * { throw std::runtime_error("unexpected import"); });
+#endif
             put(c, 160, 513, 8);
             rejects([&] { dsee::Elf y(c); });
             put(c, 160, 192, 8);
@@ -128,6 +137,30 @@ int main() {
             rejects([&] { dsee::Elf y(c); });
         }
         {
+            // Packed addends must reject signed overflow on every host compiler.
+            for (auto values : {std::pair<int64_t, int64_t>{INT64_MAX, 1},
+                                std::pair<int64_t, int64_t>{INT64_MIN, -1}}) {
+                auto c = b;
+                Bytes packed = {'A', 'P', 'S', '2'};
+                for (auto v : std::vector<int64_t>{2, 184, 1, 15, 8, 1027, values.first, 1, 15, 8,
+                                                   1027, values.second})
+                    sleb(packed, v);
+                section(c, 0x60000002, packed.size(), 1);
+                std::copy(packed.begin(), packed.end(), c.begin() + 160);
+                rejects([&] { dsee::Elf x(c); });
+                packed.clear();
+                packed.insert(packed.end(), {'A', 'P', 'S', '2'});
+                for (auto v : std::vector<int64_t>{2, 184, 1, 15, 8, 1027, values.first, 1, 15, 8,
+                                                   1027, -values.second})
+                    sleb(packed, v);
+                section(c, 0x60000002, packed.size(), 1);
+                std::copy(packed.begin(), packed.end(), c.begin() + 160);
+                dsee::Elf parsed(c);
+                check(parsed.relocs.size() == 2 &&
+                      parsed.relocs[1].addend == values.first - values.second);
+            }
+        }
+        {
             auto c = b;
             section(c, 0x6fffff00, 16, 8);
             put(c, 160, 192, 8);
@@ -138,10 +171,26 @@ int main() {
             put(c, 160, 3, 8);
             rejects([&] { dsee::Elf y(c); });
         }
-        char tmp[] = "/tmp/dsee-unit-XXXXXX";
-        auto *dir = mkdtemp(tmp);
-        check(dir);
-        std::filesystem::path root(dir);
+        // Check the same 64-bit seek used by the offline PCM spool without
+        // allocating gigabytes on disk. Windows requires explicit sparse mode.
+        {
+            std::unique_ptr<FILE, decltype(&std::fclose)> spool(dsee::temporary_spool(),
+                                                                std::fclose);
+#ifdef _WIN32
+            DWORD returned = 0;
+            check(DeviceIoControl(reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(spool.get()))),
+                                  FSCTL_SET_SPARSE, nullptr, 0, nullptr, 0, &returned,
+                                  nullptr) != 0);
+#endif
+            constexpr int64_t offset = INT64_C(2147483664);
+            check(dsee::seek_file(spool.get(), offset, SEEK_SET) == 0);
+            uint32_t value = 0x12345678, readback = 0;
+            check(std::fwrite(&value, sizeof(value), 1, spool.get()) == 1);
+            check(dsee::seek_file(spool.get(), offset, SEEK_SET) == 0);
+            check(std::fread(&readback, sizeof(readback), 1, spool.get()) == 1 &&
+                  readback == value);
+        }
+        auto root = dsee::temporary_directory("dsee-unit-");
         try {
             Bytes w(48);
             std::copy_n("RIFF", 4, w.begin());
@@ -159,10 +208,12 @@ int main() {
             put(w, 44, 123, 2);
             put(w, 46, 456, 2);
             save(root / "in.wav", w);
-            dsee::WavReader input(root / "in.wav");
-            int16_t samples[2];
-            check(input.frames == 1 && input.read(samples, 1) == 1 && samples[0] == 123 &&
-                  samples[1] == 456 && input.read(samples, 1) == 0);
+            {
+                dsee::WavReader input(root / "in.wav");
+                int16_t samples[2];
+                check(input.frames == 1 && input.read(samples, 1) == 1 && samples[0] == 123 &&
+                      samples[1] == 456 && input.read(samples, 1) == 0);
+            }
             {
                 auto c = w;
                 put(c, 24, 44100, 4);

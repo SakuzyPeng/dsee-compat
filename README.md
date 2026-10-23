@@ -2,8 +2,8 @@
 
 **简体中文** · [English](README.en.md)
 
-一个让**一款受支持的 Sony Android 音频库在 Apple Silicon macOS 上运行**的独立兼容运行时，附带 WAV 命令行工具。
-它用 C++17 编写，在内存中完成 ELF 重定位，并只做范围很窄的 ABI 适配，然后直接执行原始的 ARM64 指令。
+一个让**一款受支持的 Sony Android 音频库在 Apple Silicon macOS 和 Windows x86-64 上运行**的独立兼容运行时，附带 WAV 命令行工具。
+Apple Silicon 原生执行 ARM64 指令，Windows 使用 Dynarmic JIT；两者共用 C API、流式状态机和 WAV 工具。公开接口与后处理使用 C++17，内部 Dynarmic 目标使用 C++20。
 
 > **本仓库不分发任何 Sony 代码、二进制、模型、参数文件、固件下载或改编过的镜像。** 构建时不需要这些资源；
 > 运行时请在本地提供你自己的资源。这不是 Sony 产品，也不是官方支持的移植。MIT 只覆盖本仓库自己的代码，
@@ -29,9 +29,9 @@
 
 ## 能用它做什么
 
-- **在 Mac 上处理 WAV**：把 48 kHz 立体声 PCM16 输入送进原始算法，得到 48 / 96 / 192 kHz 的立体声 PCM32 输出。
+- **在 Mac 或 Windows 上处理 WAV**：把 48 kHz 立体声 PCM16 输入送进原始算法，得到 48 / 96 / 192 kHz 的立体声 PCM32 输出。
 - **检查资源是否受支持**：`inspect` 只校验库和三套参数的大小与 SHA-256，不执行任何固件代码。
-- **嵌入自己的程序**：静态库 `libdsee_compat.a` 加一个纯 C 头文件，按流式接口逐块处理。
+- **嵌入自己的程序**：静态库（macOS `.a`、Windows `.lib`）加一个纯 C 头文件，按流式接口逐块处理。
 - **不碰原始文件**：资源只读入内存校验并使用，不复制、不缓存、不修改，也不写任何补丁后的二进制。
 - **安全地写输出**：不覆盖已有文件，先写同目录临时文件，完成后再原子发布；失败时自动清理。
 
@@ -39,7 +39,7 @@
 
 | 项目 | 支持 |
 | --- | --- |
-| 主机 | Apple Silicon macOS（已在 Apple M4 Pro / macOS 27.0.1 上测试，其他机型尚未验证） |
+| 默认主机 | Apple Silicon macOS；Windows x86-64（Dynarmic） |
 | 固件 | Xperia 5 V `67.1.A.2.229`，按资源精确哈希识别 |
 | DSEE 输入 | RIFF/WAVE，格式标签 1，48 kHz，立体声，有符号 PCM16 |
 | 输出 | 立体声有符号 PCM32，48、96（默认）或 192 kHz |
@@ -47,18 +47,22 @@
 
 源元数据配置只用来选择算法参数；CLI **不解码** AAC/MP3，也不会推断 WAV 文件原来是什么编码。
 
-| | macOS（Apple Silicon） | Intel Mac | Linux / Windows |
-| --- | --- | --- | --- |
-| 构建 | ✅ | ❌ | ❌ |
-| 运行 | ✅ | ❌ | ❌ |
+| 主机 | 默认后端 | 状态 |
+| --- | --- | --- |
+| Apple Silicon macOS | NATIVE | 原生 C API / CLI |
+| Windows x86-64 | DYNARMIC | 原生 Windows 进程中的 C API / CLI，无需 WSL |
+| AArch64 Linux | NATIVE | 需 `DSEE_EXPERIMENTAL_LINUX=ON`，仍为实验性 |
 
-CMake 在非 Apple Silicon macOS 上会直接报错停止。
+`DSEE_BACKEND=AUTO` 按平台选择，也可显式选择 `NATIVE` 或 `DYNARMIC`；不支持的平台组合在配置时拒绝。
+首版集成范围不包含 Intel Mac 或 Linux x86-64。详见 [Dynarmic 构建与验证](docs/DYNARMIC.md)和 [QEMU 历史测试](docs/QEMU.md)。
+[Unicorn](docs/UNICORN.md) 保留为独立对照探针。
 
 ## 从源码构建
 
 ### 需要准备
 
-- **Apple Silicon macOS** 与 **Xcode Command Line Tools**。
+- macOS：**Apple Silicon** 与 **Xcode Command Line Tools**。
+- Windows：**x64 MSVC / Windows SDK**、C++20 支持，以及已安装的固定版本 Dynarmic 和依赖，见 [Windows 构建说明](docs/DYNARMIC.md#integrated-windows-build)。
 - **CMake 3.20+**。
 - **Python 3**——仅开发测试和仓库检查需要，音频处理运行时不需要。
 
@@ -72,7 +76,7 @@ cmake --build build -j 4
 ctest --test-dir build --output-on-failure
 ```
 
-产物是 `build/dsee-compat`（CLI）、`build/libdsee_compat.a`（兼容运行时）和
+主要产物是 `build/dsee-compat`（CLI）、`build/libdsee_compat.a`（兼容运行时）和
 `build/libdsee_postprocess.a`（原生后处理静态库）。
 加 `-DBUILD_TESTING=OFF` 可以只构建 CLI 和静态库，不需要 Python。
 
@@ -82,7 +86,8 @@ ctest --test-dir build --output-on-failure
 cmake --install build --prefix <目标目录>
 ```
 
-会安装 CLI、两个静态库，以及 `dsee_compat.h` 和 `dsee_postprocess.hpp`。
+会安装 CLI、公开静态库及内部支持库、两个公开头文件，以及传递静态链接依赖的 CMake 包。
+Windows 构建还需要在消费项目中提供 Dynarmic 安装前缀；CMake 不下载依赖。
 
 ## 准备外部资源目录
 
@@ -160,7 +165,17 @@ build/dsee-compat postprocess \
 
 ## C API
 
-包含 `dsee_compat.h`，链接 `libdsee_compat.a` 和 C++ 标准库。头文件是合法的 C。
+包含 `dsee_compat.h`；头文件是合法的 C。建议通过安装后的 CMake target 链接，以传递内部支持库、Dynarmic 和系统依赖：
+
+```cmake
+project(my_app LANGUAGES C CXX)
+find_package(dsee_compat CONFIG REQUIRED)
+add_executable(my_app main.c)
+target_link_libraries(my_app PRIVATE dsee::dsee_compat)
+set_target_properties(my_app PROPERTIES LINKER_LANGUAGE CXX)
+```
+
+将安装目录（Windows 还包括 Dynarmic 前缀）加入 `CMAKE_PREFIX_PATH`。Windows C API 的资源目录字符串使用 UTF-8；CLI 支持中文和空格路径。
 
 ```text
 dsee_inspect → dsee_create → 多次 dsee_process → 多次 dsee_finish → dsee_destroy
@@ -200,7 +215,8 @@ DSEE 运行时每个进程只允许一个活动实例，并发调用返回 `DSEE
 
 ## 已知限制
 
-- **只在 Apple M4 Pro / macOS 27.0.1 上测试过**，其他 Apple Silicon 机型、其他固件版本都未验证。
+- 原生 macOS 路径在 Apple M4 Pro / macOS 27.0.1 上验证；其他 Apple Silicon 机型、其他固件版本尚未验证。
+- ARM64 Linux / x86-64 QEMU 路径为实验性，部分输出与 macOS 存在微小数值差异，见 [QEMU 验证说明](docs/QEMU.md)。
 - **没有拿 Xperia 真机的输出做过比对**：目前的一致性只针对本地研究用的原始 wrapper 参考结果。
 - 不支持 RF64、WAVE extensible、24 位和浮点；DSEE 输入仍限定为 48 kHz PCM16。
 - 没有 GUI、没有 Audio Unit；DSEE 运行时不支持多实例并发。

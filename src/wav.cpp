@@ -1,8 +1,8 @@
 #include "wav.hpp"
+#include "platform.hpp"
 #include <array>
 #include <cstring>
 #include <stdexcept>
-#include <unistd.h>
 #include <vector>
 namespace dsee {
 namespace {
@@ -118,28 +118,17 @@ size_t WavReader::read_at(uint64_t first, StereoFrame *out, size_t count) {
     return n;
 }
 WavWriter::WavWriter(const std::filesystem::path &path, unsigned sample_rate)
-    : destination(path.string()), rate(sample_rate) {
+    : destination(path), rate(sample_rate) {
     require(rate == 48000 || rate == 96000 || rate == 192000, "Unsupported output rate");
     require(!std::filesystem::exists(path) && !std::filesystem::is_symlink(path),
             "Output already exists");
-    std::string pattern = destination + ".tmp.XXXXXX";
-    std::vector<char> name(pattern.begin(), pattern.end());
-    name.push_back(0);
-    int fd = mkstemp(name.data());
-    require(fd >= 0, "Cannot create temporary output beside destination");
-    temporary = name.data();
-    file = fdopen(fd, "w+b");
-    if (!file) {
-        close(fd);
-        unlink(temporary.c_str());
-        throw std::runtime_error("Cannot open temporary output");
-    }
+    file = temporary_file(destination, temporary);
     try {
         header();
     } catch (...) {
         std::fclose(file);
         file = nullptr;
-        unlink(temporary.c_str());
+        remove_file(temporary);
         throw;
     }
 }
@@ -147,7 +136,7 @@ WavWriter::~WavWriter() {
     if (file)
         std::fclose(file);
     if (!temporary.empty())
-        unlink(temporary.c_str());
+        remove_file(temporary);
 }
 void WavWriter::header() {
     unsigned char h[44]{};
@@ -173,15 +162,11 @@ void WavWriter::write(const int32_t *data, size_t n) {
 }
 void WavWriter::commit() {
     header();
-    require(std::fflush(file) == 0, "Cannot flush output");
-    require(fsync(fileno(file)) == 0, "Cannot sync output");
+    sync_file(file);
     int result = std::fclose(file);
     file = nullptr;
     require(result == 0, "Cannot close output");
-    // Same-directory hard link publishes atomically without replacing a raced-in file.
-    require(link(temporary.c_str(), destination.c_str()) == 0,
-            "Cannot publish output (destination may already exist)");
-    unlink(temporary.c_str());
+    publish_file(temporary, destination);
     temporary.clear();
 }
 } // namespace dsee

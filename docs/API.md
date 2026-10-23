@@ -1,10 +1,10 @@
 # C API contract (0.1)
 
-The installed header is the authoritative signature reference. ABI values of public statuses and source profiles are fixed for the 0.1 series. Processing input/output is interleaved stereo; a frame contains two samples. Input is signed 16-bit, output signed 32-bit. These representations match little-endian Apple Silicon.
+The installed header is the authoritative signature reference. ABI values of public statuses and source profiles are fixed for the 0.1 series. Processing input/output is interleaved stereo; a frame contains two samples. Input is signed 16-bit, output signed 32-bit. These representations match little-endian Apple Silicon, Windows x86-64 and the experimental AArch64 Linux target. Windows uses the integrated Dynarmic backend; resource-root strings are UTF-8. Under QEMU, the C API belongs to the AArch64 guest process; an x86 application cannot directly link that static library. See [QEMU notes](QEMU.md).
 
 Optional envelope/crossover controls are exposed by the separate C++ API in `dsee_postprocess.hpp`
-and both WAV CLI entry points, documented in [POSTPROCESS.md](POSTPROCESS.md). Link
-`libdsee_postprocess.a` to use them directly with seekable `AudioSource` instances and a PCM32 sink.
+and both WAV CLI entry points, documented in [POSTPROCESS.md](POSTPROCESS.md). Link the installed CMake target
+`dsee::dsee_postprocess` to use them directly with seekable `AudioSource` instances and a PCM32 sink.
 They do not alter this streaming API's ABI or pinned resource profile.
 
 ## Lifecycle
@@ -22,8 +22,20 @@ All API calls other than error/version access are guarded against concurrent ent
 
 `dsee_last_error()` returns thread-local text valid until the next API call on the same thread. Check the status first. Process output counts describe the successfully completed prefix even if a later block fails; callers creating an atomic output file should discard the entire failed conversion.
 
-Normal errors do not terminate the process. Unexpected imported interfaces, Sony error logs/assertions and compatibility-shim failures are caught at the guarded foreign-call boundary and reported as processing errors. Arbitrary native segmentation faults and host out-of-memory conditions are outside that guarantee. No process-wide signal handlers are installed.
+Normal errors do not terminate the process. Guest construction, processing and destruction failures return `DSEE_PROCESS_ERROR`; processing failure poisons the context, and subsequent process/finish calls return `DSEE_STATE_ERROR`. Destruction still releases all host resources. Host allocation failure during inspect/create returns `DSEE_INTERNAL_ERROR`. Exceptions are caught at the C boundary. Unexpected imported interfaces, Sony error logs/assertions and compatibility-shim failures are caught at the guarded foreign-call boundary and reported as processing errors. Arbitrary native segmentation faults and host out-of-memory conditions are outside that guarantee. No process-wide signal handlers are installed.
 
 ## Loading and permissions
 
-Only the pinned library is executed. The loader checks ELF64/AArch64 structure and bounds, overlapping segments, supported RELA/APS2/RELR forms, symbol references and relocation targets. Import resolution is an explicit allowlist; unused unsupported imports fail if called. The 43 expected TLS reads are redirected to a private stack-canary area. Code pages become read/execute, never write/execute. Parameters and the emulated CPU feature text are read from in-memory streams; no firmware cache or patched binary is written.
+Only the pinned library is executed. The loader checks ELF64/AArch64 structure and bounds, overlapping segments, supported RELA/APS2/RELR forms, symbol references and relocation targets. Import resolution is an explicit allowlist; unused unsupported imports fail if called. The native backend redirects the 43 expected TLS reads to a private stack-canary area; Dynarmic validates the same instruction count and supplies an emulated `TPIDR_EL0`. Code pages become read/execute, never write/execute. Parameters and the emulated CPU feature text are read from in-memory streams; no firmware cache or patched binary is written.
+
+## Backend and installation
+
+`DSEE_BACKEND=AUTO` chooses native execution on Apple Silicon and Dynarmic on Windows x86-64.
+There is no runtime backend switch or fallback emulator. The public ABI and single-instance rules are identical.
+The Dynarmic backend uses the tested safe optimization set, checked page-table mappings and a 32 MiB code cache.
+It is not a general-purpose Android runtime or a security sandbox.
+
+Install with `cmake --install`, then link `dsee::dsee_compat` from `find_package(dsee_compat CONFIG REQUIRED)`.
+The exported target supplies the internal static archives and system dependencies. On Windows the consumer
+also supplies the Dynarmic package prefix and its Boost header root when needed. A C translation unit can
+use the header; enable the C++ language for its linker. The `installed_c_client` CTest exercises this path.

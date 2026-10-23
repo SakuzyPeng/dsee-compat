@@ -18,7 +18,9 @@ typedef enum {
     DSEE_INTERNAL_ERROR
 } dsee_status;
 typedef enum { DSEE_PCM = 0, DSEE_AAC128 = 1, DSEE_MP3128 = 2 } dsee_profile;
-/* root contains vendor/lib64 and vendor/etc. No file is copied or modified. */
+/* root contains vendor/lib64 and vendor/etc. No file is copied or modified.
+ * On Windows, root is UTF-8.
+ */
 dsee_status dsee_inspect(const char *root);
 dsee_status dsee_create(const char *root, unsigned output_rate, dsee_profile profile,
                         dsee_context **result);

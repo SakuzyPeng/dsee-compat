@@ -16,15 +16,32 @@ import wave
 p=argparse.ArgumentParser()
 p.add_argument('--exe',required=True)
 p.add_argument('--assets',required=True)
-p.add_argument('--reference-results',required=True,help='External research validation.json')
+p.add_argument('--reference-results',required=True,help='External validation JSON or probe JSONL with complete PCM hashes')
 p.add_argument('--report',required=True)
+p.add_argument('--reference-label',default='original-wrapper',help='Provenance of the supplied hashes')
+p.add_argument('--core-only',action='store_true',help='Skip postprocessing comparisons (e.g. CPU emulation)')
 a=p.parse_args()
 exe=str(pathlib.Path(a.exe).resolve())
-cases=json.loads(pathlib.Path(a.reference_results).read_text())['cases']
+reference_text=pathlib.Path(a.reference_results).read_text(encoding='utf-8')
+try:
+    cases=json.loads(reference_text)['cases']
+except json.JSONDecodeError:
+    cases=[json.loads(line) for line in reference_text.splitlines() if line.strip()]
+    cases=[c for c in cases if c.get('event')=='case']
+for c in cases:
+    c.setdefault('codec_metadata', c.get('profile'))
+    c.setdefault('output_rate', c.get('rate'))
+    c.setdefault('output_bytes', 49152*(c['output_rate']//48000)*8)
+assert len(cases)==36 and len({(c['stimulus'],c['codec_metadata'],c['output_rate']) for c in cases})==36
+input_hashes={}
+
 results=[]
 postprocess_results=[]
 with tempfile.TemporaryDirectory(prefix='dsee-integration-') as tmp:
-    root=pathlib.Path(tmp)
+    root=pathlib.Path(tmp)/'音频 测试'
+    repo=pathlib.Path(__file__).resolve().parents[1]
+    assert repo not in root.resolve().parents, 'Resource fixtures must be outside the repository; set TMPDIR/TEMP to an external directory'
+    root.mkdir()
     for kind in ['silence','impulse','tone','noise']:
         rng=12345;data=bytearray()
         for i in range(49152):
@@ -33,9 +50,12 @@ with tempfile.TemporaryDirectory(prefix='dsee-integration-') as tmp:
             elif kind=='noise':rng=(rng*1664525+1013904223)&0xffffffff;x=((rng>>8)/16777216.0-0.5)*0.3
             else:x=0
             data+=struct.pack('<hh',int(x*32768),int(x*0.7*32768))
+        input_hashes[kind]=hashlib.sha256(data).hexdigest()
         with wave.open(str(root/(kind+'.wav')),'wb') as w:
             w.setparams((2,2,48000,0,'NONE','not compressed'));w.writeframes(data)
     for c in cases:
+        if 'input_sha256' in c:
+            assert c['input_sha256']==input_hashes[c['stimulus']], 'Input fixture differs from baseline'
         args=[exe,'process','--assets',a.assets,'--input',str(root/(c['stimulus']+'.wav')),
               '--output',str(root/'out.wav'),'--output-rate',str(c['output_rate']),
               '--source-profile',c['codec_metadata']]
@@ -49,8 +69,15 @@ with tempfile.TemporaryDirectory(prefix='dsee-integration-') as tmp:
         digest=hashlib.sha256(data[:expected_bytes]).hexdigest()
         assert digest==c['sha256'],(c['stimulus'],c['codec_metadata'],c['output_rate'],digest,c['sha256'])
         assert stats['input_frames']==49152 and stats['output_frames']*8==len(data)
+        full_digest=hashlib.sha256(data).hexdigest()
+        tail_blocks=(stats['output_frames']-49152*(c['output_rate']//48000))//(1024*(c['output_rate']//48000))
+        if 'full_sha256' in c:
+            assert full_digest==c['full_sha256'], (c['stimulus'],c['codec_metadata'],c['output_rate'],'full output differs')
+            assert stats['output_frames']==c['output_frames'] and tail_blocks==c['tail_blocks']
+
         results.append({'stimulus':c['stimulus'],'profile':c['codec_metadata'],'rate':c['output_rate'],
-                        'reference_prefix_sha256':digest,**stats})
+                        'reference_prefix_sha256':digest,'input_sha256':input_hashes[c['stimulus']],
+                        'full_sha256':full_digest,'tail_blocks':tail_blocks,**stats})
         # Existing output must survive a repeated command unchanged.
         before=hashlib.sha256((root/'out.wav').read_bytes()).hexdigest()
         denied=subprocess.run(args,capture_output=True,text=True)
@@ -58,7 +85,7 @@ with tempfile.TemporaryDirectory(prefix='dsee-integration-') as tmp:
         (root/'out.wav').unlink()
     # The integrated and standalone commands must produce identical PCM when
     # given the same native output/reference, including inferred latency.
-    for rate in (48000,96000,192000):
+    for rate in (() if a.core_only else (48000,96000,192000)):
         base=[exe,'process','--assets',a.assets,'--input',str(root/'noise.wav'),
               '--output-rate',str(rate)]
         subprocess.run(base+['--output',str(root/'native.wav')],check=True,capture_output=True)
@@ -80,13 +107,35 @@ with tempfile.TemporaryDirectory(prefix='dsee-integration-') as tmp:
                                         'postprocess':stats['postprocess']})
             (root/'integrated.wav').unlink();(root/'standalone.wav').unlink()
         (root/'native.wav').unlink()
-    # Verify resources are checked before the tool creates an output file.
-    bad=root/'bad-assets/vendor/lib64';bad.mkdir(parents=True)
-    lib=bytearray((pathlib.Path(a.assets)/'vendor/lib64/libsonydseehxwrapper.so').read_bytes());lib[-1]^=1
-    (bad/'libsonydseehxwrapper.so').write_bytes(lib)
-    failed=subprocess.run([exe,'process','--assets',str(root/'bad-assets'),'--input',str(root/'tone.wav'),'--output',str(root/'bad-out.wav')],capture_output=True,text=True)
-    assert failed.returncode!=0 and 'SHA-256' in failed.stderr and not (root/'bad-out.wav').exists()
-    assert not list(root.glob('*.tmp.*'))
-pathlib.Path(a.report).write_text(json.dumps({'passed':len(results),'reference':'external research fixture hashes',
-                                            'cases':results,'postprocess_cases':postprocess_results},indent=2)+'\n')
-print(f'{len(results)} original-wrapper references and {len(postprocess_results)} integrated/standalone comparisons passed; output refusal and corrupt-resource checks passed')
+    # Resource fixtures are temporary, outside the repository and any build tree.
+    specs=['vendor/lib64/libsonydseehxwrapper.so','vendor/etc/dsx_param_file.bin',
+           'vendor/etc/DrangeparaPCM48.bin','vendor/etc/DrangeparaAAC128.bin','vendor/etc/DrangeparaMP3_128.bin']
+    assets=pathlib.Path(a.assets)
+    bad_root=root/'bad-assets'
+    for name in specs:
+        target=bad_root/name
+        target.parent.mkdir(parents=True,exist_ok=True)
+        target.write_bytes((assets/name).read_bytes())
+    for index,name in enumerate(specs):
+        target=bad_root/name
+        original=target.read_bytes()
+        corrupt=bytearray(original);corrupt[-1]^=1;target.write_bytes(corrupt)
+        inspected=subprocess.run([exe,'inspect','--assets',str(bad_root)],capture_output=True,text=True,encoding='utf-8',errors='replace')
+        assert inspected.returncode!=0 and 'SHA-256' in inspected.stderr
+        profile='pcm' if index<3 else ('aac128' if index==3 else 'mp3128')
+        failed=subprocess.run([exe,'process','--assets',str(bad_root),'--source-profile',profile,
+                               '--input',str(root/'tone.wav'),'--output',str(root/'bad-out.wav')],capture_output=True,text=True,encoding='utf-8',errors='replace')
+        assert failed.returncode!=0 and 'SHA-256' in failed.stderr and not (root/'bad-out.wav').exists()
+        target.write_bytes(original)
+    # Creation needs only the selected parameters; inspect requires every profile.
+    (bad_root/specs[3]).unlink();(bad_root/specs[4]).unlink()
+    with wave.open(str(root/'empty.wav'),'wb') as w:
+        w.setparams((2,2,48000,0,'NONE','not compressed'));w.writeframes(b'')
+    empty=subprocess.run([exe,'process','--assets',str(bad_root),'--input',str(root/'empty.wav'),
+                          '--output',str(root/'empty-output.wav')],capture_output=True,text=True,encoding='utf-8',errors='replace')
+    assert empty.returncode==0,(empty.stdout,empty.stderr)
+    assert json.loads(empty.stdout)['output_frames']==0 and (root/'empty-output.wav').stat().st_size==44
+    assert not list(root.rglob('*.tmp.*'))
+pathlib.Path(a.report).write_text(json.dumps({'passed':len(results),'reference':a.reference_label,
+                                            'cases':results,'postprocess_cases':postprocess_results,'corrupt_resources_rejected':5,'selected_resources_only':True,'unicode_paths':True},indent=2)+'\n')
+print(f'{len(results)} {a.reference_label} references and {len(postprocess_results)} integrated/standalone comparisons passed; output refusal and corrupt-resource checks passed')

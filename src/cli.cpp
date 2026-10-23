@@ -1,4 +1,5 @@
 #include "dsee_compat.h"
+#include "platform.hpp"
 #include "wav.hpp"
 #include <array>
 #include <chrono>
@@ -189,7 +190,7 @@ class PcmSpool : public dsee::AudioSource {
     uint64_t frames = 0;
 
   public:
-    explicit PcmSpool(unsigned sample_rate) : file(std::tmpfile()), rate(sample_rate) {
+    explicit PcmSpool(unsigned sample_rate) : file(dsee::temporary_spool()), rate(sample_rate) {
         if (!file)
             throw std::runtime_error("Cannot create temporary PCM spool");
     }
@@ -213,7 +214,7 @@ class PcmSpool : public dsee::AudioSource {
             return 0;
         count = size_t(std::min<uint64_t>(count, frames - first));
         std::vector<int32_t> pcm(count * 2);
-        if (fseeko(file, off_t(first * 8), SEEK_SET) ||
+        if (dsee::seek_file(file, int64_t(first * 8), SEEK_SET) ||
             std::fread(pcm.data(), 8, count, file) != count)
             throw std::runtime_error("Cannot read temporary PCM spool");
         for (size_t i = 0; i < count; ++i)
@@ -222,7 +223,7 @@ class PcmSpool : public dsee::AudioSource {
     }
 };
 } // namespace
-int main(int argc, char **argv) {
+int cli_main(int argc, char **argv) {
     try {
         std::cout << std::setprecision(12);
         if (argc == 2 && std::string(argv[1]) == "--version") {
@@ -268,7 +269,8 @@ int main(int argc, char **argv) {
                          "\"aac128\",\"mp3128\"]}\n";
             return 0;
         }
-        auto input = required("--input"), output = required("--output");
+        auto input = dsee::path_from_utf8(required("--input"));
+        auto output = dsee::path_from_utf8(required("--output"));
         if (std::filesystem::weakly_canonical(input) == std::filesystem::weakly_canonical(output))
             throw std::runtime_error("Input and output must differ");
         if (std::filesystem::path(output).extension() != ".wav")
@@ -288,7 +290,8 @@ int main(int argc, char **argv) {
                 throw std::runtime_error("PCM32 output would exceed the RIFF size limit");
             std::unique_ptr<dsee::WavReader> reference;
             if (options.active())
-                reference = std::make_unique<dsee::WavReader>(required("--reference"), false);
+                reference = std::make_unique<dsee::WavReader>(
+                    dsee::path_from_utf8(required("--reference")), false);
             options.validate(processed.sample_rate(), reference ? reference->sample_rate() : 0);
             dsee::WavWriter writer(output, processed.sample_rate());
             auto start = std::chrono::steady_clock::now();
@@ -324,7 +327,8 @@ int main(int argc, char **argv) {
         dsee::WavReader reader(input);
         std::unique_ptr<dsee::WavReader> separate_reference;
         if (options.active() && args.count("--reference"))
-            separate_reference = std::make_unique<dsee::WavReader>(required("--reference"), false);
+            separate_reference = std::make_unique<dsee::WavReader>(
+                dsee::path_from_utf8(required("--reference")), false);
         dsee::AudioSource *reference = separate_reference ? separate_reference.get() : &reader;
         options.validate(rate, reference->sample_rate());
         uint64_t padded = (reader.frames + 1023) / 1024 * 1024;
@@ -392,3 +396,22 @@ int main(int argc, char **argv) {
         return 1;
     }
 }
+
+#ifdef _WIN32
+int wmain(int argc, wchar_t **argv) {
+    try {
+        auto args = dsee::utf8_arguments(argc, argv);
+        std::vector<char *> pointers;
+        for (auto &arg : args)
+            pointers.push_back(arg.data());
+        return cli_main(argc, pointers.data());
+    } catch (const std::exception &e) {
+        std::cerr << "dsee-compat: " << e.what() << '\n';
+        return 1;
+    }
+}
+#else
+int main(int argc, char **argv) {
+    return cli_main(argc, argv);
+}
+#endif

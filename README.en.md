@@ -3,8 +3,9 @@
 [简体中文](README.md) · **English**
 
 An independent compatibility runtime, with a WAV command-line tool, for **running one supported Sony Android
-audio library on Apple Silicon macOS**. It is written in C++17, relocates the ELF in memory, applies narrowly
-scoped ABI adaptation, and then executes the original ARM64 instructions.
+audio library on Apple Silicon macOS and Windows x86-64**. Apple Silicon executes ARM64 natively; Windows uses
+Dynarmic JIT. Both share the streaming C API and WAV CLI. Public interfaces and postprocessing use C++17;
+the internal Dynarmic target uses C++20.
 
 > **No Sony code, binaries, models, parameter files, firmware downloads, or adapted images are distributed here.**
 > Build the tool without those resources; provide your own resources locally when running it. This is not a Sony
@@ -32,11 +33,11 @@ for test results and performance numbers see the [validation record](docs/VALIDA
 
 ## What you can do with it
 
-- **Process WAV files on a Mac**: feed 48 kHz stereo PCM16 into the original algorithm and get stereo PCM32 at
+- **Process WAV files on a Mac or Windows**: feed 48 kHz stereo PCM16 into the original algorithm and get stereo PCM32 at
   48 / 96 / 192 kHz.
 - **Check whether your resources are supported**: `inspect` verifies the size and SHA-256 of the library and all
   three profiles without executing any firmware code.
-- **Embed it in your own program**: a static library `libdsee_compat.a` plus a plain C header, with a streaming
+- **Embed it in your own program**: static libraries (`.a` on macOS, `.lib` on Windows) plus a plain C header, with a streaming
   block-by-block interface.
 - **Leave the originals alone**: resources are read into memory, verified and used there — never copied, cached
   or modified, and no patched binary is written.
@@ -47,7 +48,7 @@ for test results and performance numbers see the [validation record](docs/VALIDA
 
 | Item | Supported |
 | --- | --- |
-| Host | Apple Silicon macOS (tested on Apple M4 Pro / macOS 27.0.1; other systems not yet validated) |
+| Default host | Apple Silicon macOS; Windows x86-64 with Dynarmic |
 | Firmware | Xperia 5 V `67.1.A.2.229`, identified by exact resource hashes |
 | DSEE input | RIFF/WAVE, format tag 1, 48 kHz, stereo, signed PCM16 |
 | Output | Stereo signed PCM32 at 48, 96 (default) or 192 kHz |
@@ -56,18 +57,23 @@ for test results and performance numbers see the [validation record](docs/VALIDA
 Source metadata profiles only select algorithm parameters; the CLI does **not** decode AAC/MP3 or infer the
 original codec of a WAV file.
 
-| | macOS (Apple Silicon) | Intel Mac | Linux / Windows |
-| --- | --- | --- | --- |
-| Build | ✅ | ❌ | ❌ |
-| Run | ✅ | ❌ | ❌ |
+| Host | Default backend | Status |
+| --- | --- | --- |
+| Apple Silicon macOS | NATIVE | Native C API and CLI |
+| Windows x86-64 | DYNARMIC | C API and CLI in a native Windows process; no WSL |
+| AArch64 Linux | NATIVE | Experimental; requires `DSEE_EXPERIMENTAL_LINUX=ON` |
 
-CMake stops with an error on anything other than Apple Silicon macOS.
+`DSEE_BACKEND=AUTO` selects the platform backend; `NATIVE` and `DYNARMIC` may also be selected explicitly.
+Unsupported combinations fail during configuration. Intel Mac and Linux x86-64 integration are outside this version.
+See [Dynarmic build and validation](docs/DYNARMIC.md) and the [historical QEMU tests](docs/QEMU.md).
+[Unicorn](docs/UNICORN.md) remains a separate comparison probe.
 
 ## Building from source
 
 ### Requirements
 
-- **Apple Silicon macOS** and **Xcode Command Line Tools**.
+- macOS: **Apple Silicon** and **Xcode Command Line Tools**.
+- Windows: **x64 MSVC / Windows SDK**, C++20 support, and the pinned Dynarmic package with its dependencies; see the [Windows build instructions](docs/DYNARMIC.md#integrated-windows-build).
 - **CMake 3.20+**.
 - **Python 3** — only for development tests and repository checks; audio processing does not need it.
 
@@ -81,7 +87,7 @@ cmake --build build -j 4
 ctest --test-dir build --output-on-failure
 ```
 
-Outputs are `build/dsee-compat` (CLI), `build/libdsee_compat.a` (compatibility runtime) and
+The main outputs are `build/dsee-compat` (CLI), `build/libdsee_compat.a` (compatibility runtime) and
 `build/libdsee_postprocess.a` (native postprocessing library).
 Add `-DBUILD_TESTING=OFF` to build only the CLI and static library, without Python.
 
@@ -91,7 +97,9 @@ Add `-DBUILD_TESTING=OFF` to build only the CLI and static library, without Pyth
 cmake --install build --prefix <destination>
 ```
 
-This installs the CLI, both static libraries, `dsee_compat.h` and `dsee_postprocess.hpp`.
+This installs the CLI, the public and internal support archives, the public headers, and a CMake package
+that propagates static link dependencies. Windows consumers also provide the Dynarmic installation prefix.
+CMake does not download dependencies.
 
 ## Preparing the external resource directory
 
@@ -177,7 +185,18 @@ controls, format restrictions, C++ use and the meanings of 50% and 100%.
 
 ## C API
 
-Include `dsee_compat.h`, link `libdsee_compat.a` and the C++ standard library. The header is valid C.
+Include `dsee_compat.h`; the header is valid C. Use the installed CMake target to propagate internal archives, Dynarmic and system link dependencies:
+
+```cmake
+project(my_app LANGUAGES C CXX)
+find_package(dsee_compat CONFIG REQUIRED)
+add_executable(my_app main.c)
+target_link_libraries(my_app PRIVATE dsee::dsee_compat)
+set_target_properties(my_app PROPERTIES LINKER_LANGUAGE CXX)
+```
+
+Add the install prefix and, on Windows, the Dynarmic prefix to `CMAKE_PREFIX_PATH`.
+Windows C API resource paths are UTF-8; the CLI accepts Unicode paths and spaces.
 
 ```text
 dsee_inspect → dsee_create → repeated dsee_process → repeated dsee_finish → dsee_destroy
@@ -224,8 +243,10 @@ distinct sources and sinks.
 
 ## Known limitations
 
-- **Tested only on Apple M4 Pro / macOS 27.0.1.** Other Apple Silicon systems and other firmware versions are not
+- The native macOS path is tested on Apple M4 Pro / macOS 27.0.1. Other Apple Silicon systems and other firmware versions are not
   validated.
+- AArch64 Linux / x86-64 QEMU is experimental and some outputs differ numerically from macOS;
+  see the [QEMU validation notes](docs/QEMU.md).
 - **Xperia hardware output has not been captured for comparison**; current matches are against the local
   original-wrapper research reference.
 - No RF64, WAVE extensible, 24-bit or float. DSEE input remains restricted to 48 kHz PCM16.

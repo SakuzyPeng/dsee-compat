@@ -6,6 +6,22 @@ The implementation was developed using local binary inspection and behavioral te
 
 The ELF parser and loader are implemented here. The Android packed-relocation format was checked against the [AOSP linker specification/implementation](https://android.googlesource.com/platform/bionic/+/master/linker/linker_reloc_iterators.h). ABI differences are documented by [Apple](https://developer.apple.com/documentation/xcode/writing-arm64-code-for-apple-platforms). No third-party source implementation is vendored.
 
+The experimental GNU/Linux build links the system OpenSSL library; QEMU and the
+AArch64 system libraries are separate runtime dependencies. Their own licenses
+apply. No emulator, Linux image, sysroot or Sony resource is distributed by this
+repository. See [the experimental build notes](QEMU.md).
+
+The optional [Unicorn probe](UNICORN.md) uses the separately supplied
+[Unicorn engine](https://github.com/unicorn-engine/unicorn), whose engine license
+is GPLv2. That dependency is not included in this repository, and MIT does not
+relicense it or a combined distribution. The probe's resource stream is a local
+test input with the same pinned hashes, not a firmware downloader.
+
+The integrated Windows runtime and [Dynarmic probe](DYNARMIC.md) use a separately supplied Dynarmic dependency.
+Dynarmic's own code is under 0BSD; its bundled dependencies retain their own
+licenses. Dependency sources, build products and synthetic PCM remain outside
+the source distribution. No original resource is included in either probe.
+
 ## What stays outside the repository
 
 - Sony libraries, firmware and parameter/model files, including copies in archives or Git LFS.

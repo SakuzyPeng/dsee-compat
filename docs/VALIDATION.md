@@ -111,3 +111,144 @@ resolution of original loudness using separate gain/limiting, and measured -0.2 
 were removed. Local records: `build/user-batch-automix-seam-2026-10-22.json` and
 `build/pray-auto-seam-comparison.json`. These measurements support the intended change in spectral
 continuity; they do not establish a perceptually optimal mix across other material.
+
+## Experimental Linux / x86-64 QEMU — 2026-10-22
+
+An opt-in AArch64 GNU/Linux runtime was built with GCC 12.2, glibc 2.36 and
+OpenSSL 3.0.20. Both native macOS and native Linux default CTest suites passed
+5/5. The pinned state allocation now explicitly reserves 112 KiB, correcting
+accesses beyond the wrapper's nominal 110,000-byte request that macOS allocator
+rounding had masked. macOS still matches all 36 original-wrapper prefixes and
+all 24 integrated/standalone postprocessing comparisons.
+
+The Linux API stress suite passed Valgrind Memcheck with zero errors and no live
+heap allocations at exit. On an Intel Core i7-11800H under WSL2 and QEMU 7.2.22,
+the complete API stress suite and 36 core output-prefix comparisons against
+native AArch64 Linux passed. The instrumented API runs omit the process-RSS
+growth limit because it includes translator caches.
+
+Linux matches only 18/36 original macOS reference prefixes bit for bit; the
+largest observed full-output difference is about -122.13 dBFS. This difference
+exists before QEMU is introduced. Full translated postprocessing was not
+validated. Build commands, exact scope, measurements and local report names are
+in [the QEMU validation notes](QEMU.md).
+
+## Unicorn probe — 2026-10-22
+
+The standalone C++ probe uses Unicorn 2.1.4 with native import bridges, a bounded
+guest heap, emulated TLS and the shared resource profile. It was built with
+AppleClang on macOS ARM64 and MSVC 14.51 on Windows x86-64. Both resource-free
+probe self-tests passed; the default native suite passed 5/5. The signed APS2
+addend overflow checks now also have explicit boundary coverage. Native macOS
+integration still passed 36 original-reference and 24 postprocessing comparisons.
+
+Mac Unicorn output matched all 36 complete native C API outputs, including
+drained tails. Windows completed all 36 cases with identical input hashes and
+frame counts; 21 complete PCM outputs were bit-identical to macOS. The largest
+absolute difference was 1,680 PCM32 units (about -122.13 dBFS), and the largest
+per-case RMS difference was about -154.61 dBFS. All five individually corrupted
+resources were refused before emulator initialization on Windows.
+
+On the same Intel Core i7-11800H used for QEMU, three repeats of 64 measured
+blocks after 64 warmup blocks produced median throughputs of 0.212–0.438 times
+real time. This prototype was slower than the previous QEMU implementation;
+neither comparison controlled host load or power state. The probe remains
+separate from the public C API and WAV CLI. Full configuration results, build
+commands and scope are in [the Unicorn notes](UNICORN.md).
+
+## Dynarmic probe — 2026-10-22
+
+Dynarmic 6.7.0 snapshot `a41c380246d3d9f9874f0f792d234dc0cc17c180` was built for
+native Windows x86-64 with the A64 frontend, safe optimizations and checked page
+table mappings. The shared-harness Unicorn regression reproduced all 36 earlier
+complete Mac outputs. Both engine self-tests passed, including non-executable
+data and a store crossing into a protected page; the default native suite passed
+5/5. The five individually corrupted resources were rejected before execution.
+
+All 36 Dynarmic complete PCM hashes matched the prior Windows Unicorn results,
+with identical inputs and frame counts. The same 21 complete outputs are
+bit-identical to native macOS; the remaining errors are consequently the same
+previously measured maximum of 1,680 PCM32 units, about -122.13 dBFS. No fallback
+engine is linked or invoked.
+
+On the Intel Core i7-11800H, three extended repeats with 64 warmup and 256 measured
+blocks gave medians of 2.33–5.92 times real time. Matching 64-block short tests
+were 4.6–6.7 times the earlier QEMU throughput and 10.4–13.6 times the earlier
+Unicorn throughput. This validates average core throughput on the fixtures,
+not live playback or deadline guarantees. Build details, per-configuration
+results and local report names are in [the Dynarmic notes](DYNARMIC.md).
+
+## Integrated Windows Dynarmic runtime — 2026-10-22
+
+The Windows x86-64 static C API and WAV CLI now share the same emulation core as
+the diagnostic probe. Apple Silicon retains its native execution backend and
+the original public ABI. Windows was built with MSVC 19.51 and the pinned Dynarmic
+6.7.0 snapshot on the Intel Core i7-11800H host. These are local validation results.
+
+- Windows default CTest: **8/8**, including authored Dynarmic memory tests,
+  synthetic ELF/WAV tests, sparse offsets beyond 2 GiB, Unicode paths, output
+  races/refusal, C headers, postprocessing, injected backend failures and an installed C client.
+- macOS default CTest: **7/7**. Its resource-backed regression retained all
+  **36 original-wrapper prefix matches** and **24 integrated/standalone comparisons**.
+  The refactored native C API and shared-core Unicorn probe each reproduced
+  **36/36 complete pre-integration Mac outputs**, including drained tails.
+- Windows C API and WAV CLI each reproduced **36/36 complete pre-integration
+  Windows Dynarmic outputs**, with identical input hashes, PCM hashes, output
+  frames and tail-block counts. API verification also compared fragmented input.
+  The Windows baseline already matched Unicorn in full; no extra tolerance was introduced.
+- Windows passed **24** integrated/standalone postprocessing comparisons,
+  **five** corrupted-resource rejections, empty-input handling and selected-resource-only
+  creation. Resource and WAV paths included Unicode and spaces.
+- The full API stress suite passed fragmentation, tails in nine configurations,
+  concurrent-entry rejection, 200 create/destroy cycles and 5,000 processing blocks.
+  Windows private-memory growth over the lifecycle check was **598,016 bytes**
+  (about **0.57 MiB**, below 16 MiB); the macOS run reported no additional peak RSS.
+
+### C API throughput and latency
+
+Each configuration used 64 warmup blocks and three repeats of 256 measured blocks
+(5.461333 seconds of input). The timing includes public API buffering, guest
+execution, imports and output copies. Initialization and first-block timings are
+reported separately. File I/O and offline postprocessing are excluded. No CPU affinity,
+power-state or background-load isolation was applied.
+
+| Profile | Output | Median real-time factor | Median initialization | Median first block | Median P99 block | Largest observed block |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| PCM | 48 kHz | 5.674× | 53.43 ms | 118.61 ms | 5.67 ms | 5.91 ms |
+| PCM | 96 kHz | 3.216× | 52.59 ms | 129.80 ms | 8.44 ms | 9.48 ms |
+| PCM | 192 kHz | 2.989× | 54.49 ms | 144.75 ms | 10.61 ms | 11.38 ms |
+| AAC128 | 48 kHz | 3.677× | 56.84 ms | 166.40 ms | 8.35 ms | 8.63 ms |
+| AAC128 | 96 kHz | 2.698× | 75.21 ms | 191.50 ms | 11.64 ms | 12.66 ms |
+| AAC128 | 192 kHz | 2.411× | 57.88 ms | 157.73 ms | 13.32 ms | 13.41 ms |
+| MP3128 | 48 kHz | 3.733× | 58.23 ms | 175.63 ms | 8.35 ms | 8.52 ms |
+| MP3128 | 96 kHz | 2.692× | 57.94 ms | 156.43 ms | 11.15 ms | 12.47 ms |
+| MP3128 | 192 kHz | 2.306× | 55.71 ms | 147.25 ms | 13.20 ms | 14.13 ms |
+
+All nine median throughputs exceeded real time (**2.31–5.67×**); all 27 individual
+samples also exceeded real time (minimum **2.276×**). Each percentile column
+summarizes the three per-repeat measurements rather than pooling samples.
+Full P50/P95/P99/max measurements are retained in `build/windows/benchmark.jsonl`.
+Cold first-block execution took much longer than a steady block, so these results
+do not establish a live-playback deadline guarantee. Real music and live playback
+remain outside this first integration acceptance run.
+
+Local reports are in `build/windows`: `integration.json`, `api-verify.jsonl`,
+`api-lifecycle.jsonl`, `benchmark.jsonl`, `benchmark-summary.json`, `host.json`,
+`mac-integration.json`, `mac-api-comparison.json` and `mac-unicorn-verify.jsonl`.
+Original resources were supplied through explicit external directories. Windows
+resource staging and corrupt fixtures were outside the repository/build tree.
+
+### Thirty-minute stream and cleanup
+
+The Windows MP3128/192 kHz run processed **84,375 measured blocks**, representing
+**1,800 seconds** of changing deterministic noise, after 64 warmup blocks. It completed
+in **763.14 seconds** (about **2.36× real time**), with all measured blocks producing
+nonzero PCM and the expected frame counts. The final tail drained in **eight blocks**.
+Peak sampled private-memory growth after warmup was **0 bytes**, below the 16 MiB limit.
+Memory was sampled every 4,096 blocks and at completion; PCM was checked and checksummed
+in memory rather than retained. The recorded rolling checksum is `7111313578768470239`.
+
+The temporary external Windows resource tree, including corruption fixtures, was removed
+after all validation completed. `long-stream.jsonl` and `validation-status.json` record
+the run and cleanup. The AArch64 Linux build remains experimental; it was not rerun
+as part of this Windows integration.

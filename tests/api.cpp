@@ -1,12 +1,23 @@
 #include "dsee_compat.h"
+#include "fixtures.hpp"
+#include "platform.hpp"
+#include "resources.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
+#include <iomanip>
 #include <iostream>
 #include <stdexcept>
+#ifdef _WIN32
+#include <windows.h>
+
+#include <psapi.h>
+#else
 #include <sys/resource.h>
+#endif
 #include <thread>
 #include <vector>
 void expect(bool b) {
@@ -52,12 +63,25 @@ std::vector<int32_t> run(const char *root, const std::vector<int16_t> &input, bo
     ok(dsee_destroy(c));
     return result;
 }
-long rss() {
+int64_t rss() {
+#ifdef _WIN32
+    PROCESS_MEMORY_COUNTERS_EX counters{};
+    if (!GetProcessMemoryInfo(GetCurrentProcess(),
+                              reinterpret_cast<PROCESS_MEMORY_COUNTERS *>(&counters),
+                              sizeof(counters)))
+        throw std::runtime_error("Cannot query private process memory");
+    return int64_t(counters.PrivateUsage);
+#else
     rusage r{};
     getrusage(RUSAGE_SELF, &r);
+#if defined(__APPLE__)
     return r.ru_maxrss;
+#else
+    return r.ru_maxrss * 1024;
+#endif
+#endif
 }
-int main(int argc, char **argv) {
+int api_main(int argc, char **argv) {
     try {
         expect(dsee_inspect(nullptr) == DSEE_INVALID_ARGUMENT);
         dsee_context *c = nullptr;
@@ -73,31 +97,154 @@ int main(int argc, char **argv) {
             return 0;
         }
         const char *root = argv[1];
-        if (argc == 3 && std::string(argv[2]) == "benchmark") {
+        // Emulator/instrumentation RSS includes translation caches, not just
+        // allocations owned by the library. Still run every lifecycle check.
+        bool instrumented = argc == 3 && std::string(argv[2]) == "instrumented";
+        if (argc >= 3 && std::string(argv[2]) == "verify") {
+            expect(argc == 3);
+            const char *profiles[] = {"pcm", "aac128", "mp3128"};
+            for (int p = 0; p < 3; ++p)
+                for (unsigned rate : {48000U, 96000U, 192000U})
+                    for (const char *kind : {"silence", "impulse", "tone", "noise"}) {
+                        auto input = dsee::test::fixture(kind);
+                        auto pcm = run(root, input, false, true, rate, dsee_profile(p));
+                        auto fragmented = run(root, input, true, true, rate, dsee_profile(p));
+                        expect(pcm == fragmented);
+                        size_t prefix_samples = input.size() * (rate / 48000);
+                        expect(pcm.size() >= prefix_samples);
+                        size_t tail_blocks =
+                            (pcm.size() - prefix_samples) / (2048 * (rate / 48000));
+                        std::cout << "{\"event\":\"case\",\"stimulus\":\"" << kind
+                                  << "\",\"profile\":\"" << profiles[p] << "\",\"rate\":" << rate
+                                  << ",\"input_sha256\":\""
+                                  << dsee::sha256(input.data(), input.size() * 2)
+                                  << "\",\"sha256\":\""
+                                  << dsee::sha256(pcm.data(), prefix_samples * 4)
+                                  << "\",\"full_sha256\":\""
+                                  << dsee::sha256(pcm.data(), pcm.size() * 4)
+                                  << "\",\"output_frames\":" << pcm.size() / 2
+                                  << ",\"tail_blocks\":" << tail_blocks << "}" << std::endl;
+                    }
+            return 0;
+        }
+        if (argc >= 3 && std::string(argv[2]) == "benchmark") {
+            expect(argc <= 5);
+            auto number = [](const char *text, size_t limit) {
+                size_t end = 0;
+                auto n = std::stoull(text, &end);
+                if (end != std::strlen(text) || !n || n > limit)
+                    throw std::runtime_error("Invalid benchmark count");
+                return size_t(n);
+            };
+            size_t blocks = argc >= 4 ? number(argv[3], 1000000) : 1440;
+            size_t repeats = argc == 5 ? number(argv[4], 100) : 1;
+            double audio_seconds = double(blocks) * 1024 / 48000;
             std::array<int16_t, 2048> input{};
             unsigned rng = 12345;
-            for (auto &s : input) {
+            for (auto &sample : input) {
                 rng = rng * 1664525 + 1013904223;
-                s = int16_t(int(rng >> 16) / 8 - 4096);
+                sample = int16_t(int(rng >> 16) / 8 - 4096);
             }
-            for (int p = 0; p < 3; ++p)
-                for (unsigned rate : {48000U, 96000U, 192000U}) {
-                    c = create(root, rate, dsee_profile(p));
-                    for (int i = 0; i < 64; ++i)
+            using Clock = std::chrono::steady_clock;
+            auto ms = [](auto duration) {
+                return std::chrono::duration<double, std::milli>(duration).count();
+            };
+            std::cout << std::setprecision(12);
+            for (size_t repeat = 1; repeat <= repeats; ++repeat)
+                for (int p = 0; p < 3; ++p)
+                    for (unsigned rate : {48000U, 96000U, 192000U}) {
+                        auto start = Clock::now();
+                        c = create(root, rate, dsee_profile(p));
+                        double init_ms = ms(Clock::now() - start);
+                        start = Clock::now();
                         ok(dsee_process(c, input.data(), 1024, dummy, 4096, &a, &b));
-                    auto start = std::chrono::steady_clock::now();
-                    for (int i = 0; i < 1440; ++i) {
-                        ok(dsee_process(c, input.data(), 1024, dummy, 4096, &a, &b));
-                        expect(a == 1024 && b == 1024 * rate / 48000);
+                        double first_ms = ms(Clock::now() - start);
+                        for (int i = 1; i < 64; ++i)
+                            ok(dsee_process(c, input.data(), 1024, dummy, 4096, &a, &b));
+                        std::vector<double> latency;
+                        latency.reserve(blocks);
+                        start = Clock::now();
+                        for (size_t i = 0; i < blocks; ++i) {
+                            auto block_start = Clock::now();
+                            ok(dsee_process(c, input.data(), 1024, dummy, 4096, &a, &b));
+                            latency.push_back(ms(Clock::now() - block_start));
+                            expect(a == 1024 && b == 1024 * rate / 48000);
+                        }
+                        double seconds =
+                            std::chrono::duration<double>(Clock::now() - start).count();
+                        ok(dsee_destroy(c));
+                        std::sort(latency.begin(), latency.end());
+                        auto quantile = [&](double q) {
+                            return latency[size_t(std::ceil(q * double(blocks))) - 1];
+                        };
+                        std::cout << "{\"repeat\":" << repeat << ",\"profile\":" << p
+                                  << ",\"rate\":" << rate
+                                  << ",\"warmup_blocks\":64,\"measured_blocks\":" << blocks
+                                  << ",\"audio_seconds\":" << audio_seconds
+                                  << ",\"seconds\":" << seconds
+                                  << ",\"realtime_factor\":" << audio_seconds / seconds
+                                  << ",\"initialization_ms\":" << init_ms
+                                  << ",\"first_block_ms\":" << first_ms
+                                  << ",\"p50_ms\":" << quantile(0.5)
+                                  << ",\"p95_ms\":" << quantile(0.95)
+                                  << ",\"p99_ms\":" << quantile(0.99)
+                                  << ",\"max_ms\":" << latency.back() << "}" << std::endl;
                     }
-                    double seconds =
-                        std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
-                            .count();
-                    ok(dsee_destroy(c));
-                    std::cout << "{\"profile\":" << p << ",\"rate\":" << rate
-                              << ",\"audio_seconds\":30.72,\"seconds\":" << seconds
-                              << ",\"realtime_factor\":" << 30.72 / seconds << "}\n";
+            return 0;
+        }
+        if (argc >= 3 && std::string(argv[2]) == "long-stream") {
+            expect(argc == 3 || argc == 4);
+            size_t end = 0;
+            auto seconds = argc == 4 ? std::stoull(argv[3], &end) : 1800;
+            expect(seconds && seconds <= 86400 && (argc != 4 || end == std::strlen(argv[3])));
+            const uint64_t blocks = (seconds * 48000 + 1023) / 1024;
+            c = create(root, 192000, DSEE_MP3128);
+            std::array<int16_t, 2048> input{};
+            uint32_t rng = 12345;
+            auto fill = [&] {
+                for (auto &sample : input) {
+                    rng = rng * 1664525 + 1013904223;
+                    sample = int16_t(int(rng >> 16) / 8 - 4096);
                 }
+            };
+            for (int i = 0; i < 64; ++i) {
+                fill();
+                ok(dsee_process(c, input.data(), 1024, dummy, 4096, &a, &b));
+            }
+            int64_t before = rss(), peak = before;
+            uint64_t checksum = 14695981039346656037ULL, nonzero_blocks = 0;
+            auto start = std::chrono::steady_clock::now();
+            for (uint64_t i = 0; i < blocks; ++i) {
+                fill();
+                ok(dsee_process(c, input.data(), 1024, dummy, 4096, &a, &b));
+                expect(a == 1024 && b == 4096);
+                nonzero_blocks += std::any_of(std::begin(dummy), std::end(dummy),
+                                              [](int32_t x) { return x != 0; });
+                for (auto sample : dummy)
+                    checksum = (checksum ^ uint32_t(sample)) * 1099511628211ULL;
+                if ((i + 1) % 4096 == 0) {
+                    peak = std::max(peak, rss());
+                    std::cout << "{\"event\":\"progress\",\"blocks\":" << i + 1
+                              << ",\"memory_growth_bytes\":" << peak - before << "}" << std::endl;
+                }
+            }
+            peak = std::max(peak, rss());
+            double elapsed =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+            expect(nonzero_blocks == blocks && peak - before < 16 * 1024 * 1024);
+            int done = 0;
+            unsigned tail = 0;
+            while (!done) {
+                size_t made = 0, padding = 0;
+                ok(dsee_finish(c, dummy, 4096, &made, &padding, &done));
+                expect(made == 4096 && ++tail <= 48);
+            }
+            ok(dsee_destroy(c));
+            std::cout << "{\"event\":\"complete\",\"profile\":2,\"rate\":192000,\"blocks\":"
+                      << blocks << ",\"audio_seconds\":" << double(blocks) * 1024 / 48000
+                      << ",\"seconds\":" << elapsed << ",\"memory_growth_bytes\":" << peak - before
+                      << ",\"checksum\":" << checksum << ",\"nonzero_blocks\":" << nonzero_blocks
+                      << ",\"tail_blocks\":" << tail << "}" << std::endl;
             return 0;
         }
         c = create(root);
@@ -145,13 +292,14 @@ int main(int argc, char **argv) {
             t.join();
         expect(busy > 0 && bad == 0);
         ok(dsee_destroy(c));
-        long before = rss();
+        int64_t before = rss();
         for (int i = 0; i < 200; ++i) {
             c = create(root);
             ok(dsee_destroy(c));
         }
-        long growth = rss() - before;
-        expect(growth < 16 * 1024 * 1024);
+        int64_t growth = rss() - before;
+        if (!instrumented)
+            expect(growth < 16 * 1024 * 1024);
         c = create(root);
         std::array<int16_t, 2048> input{};
         for (int i = 0; i < 5000; ++i) {
@@ -162,9 +310,30 @@ int main(int argc, char **argv) {
         std::cout << "API fragmentation, tail reference (9 modes), concurrent rejection, 200 "
                      "lifecycles and long stream passed; RSS growth="
                   << growth << " bytes\n";
+        if (instrumented)
+            std::cout << "RSS limit skipped for instrumentation; inspect its memory report\n";
         return 0;
     } catch (const std::exception &e) {
         std::cerr << e.what() << '\n';
         return 1;
     }
 }
+
+#ifdef _WIN32
+int wmain(int argc, wchar_t **argv) {
+    try {
+        auto args = dsee::utf8_arguments(argc, argv);
+        std::vector<char *> pointers;
+        for (auto &arg : args)
+            pointers.push_back(arg.data());
+        return api_main(argc, pointers.data());
+    } catch (const std::exception &e) {
+        std::cerr << e.what() << '\n';
+        return 1;
+    }
+}
+#else
+int main(int argc, char **argv) {
+    return api_main(argc, argv);
+}
+#endif

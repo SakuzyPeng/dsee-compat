@@ -1,0 +1,5 @@
+@PACKAGE_INIT@
+include(CMakeFindDependencyMacro)
+@DSEE_CONFIG_DEPENDENCIES@
+include("${CMAKE_CURRENT_LIST_DIR}/dsee_compatTargets.cmake")
+check_required_components(dsee_compat)

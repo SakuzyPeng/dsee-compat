@@ -79,9 +79,22 @@ with tempfile.TemporaryDirectory(prefix='dsee-cli-') as tmp:
     before=(root/'copy.wav').read_bytes()
     run('postprocess','--input','pcm32.wav','--output','copy.wav','--mode','none')
     assert (root/'copy.wav').read_bytes()==before
-    (root/'link.wav').symlink_to(root/'missing-target')
-    run('postprocess','--input','pcm32.wav','--output','link.wav','--mode','none')
-    assert (root/'link.wav').is_symlink()
+    try:
+        (root/'link.wav').symlink_to(root/'missing-target')
+    except OSError as e:
+        if os.name != 'nt' or getattr(e, 'winerror', None) != 1314:
+            raise
+        print('Symlink-only check unavailable: Windows symlink privilege is not enabled')
+    else:
+        run('postprocess','--input','pcm32.wav','--output','link.wav','--mode','none')
+        assert (root/'link.wav').is_symlink()
+    unicode_dir=root/'音频 测试'
+    unicode_dir.mkdir()
+    wav('音频 测试/输入.wav')
+    run('postprocess','--input','音频 测试/输入.wav','--output','音频 测试/输出.wav',
+        '--mode','none',success=True)
+    assert (unicode_dir/'输出.wav').read_bytes()==(unicode_dir/'输入.wav').read_bytes()
+    assert not list(unicode_dir.glob('*.tmp.*'))
     for option,value in [('--mix','nan'),('--mix','1.01'),('--mix','0.5x'),('--curve','bogus'),
                          ('--mode','bogus'),('--reference-delay','1.5'),('--reference-delay',str(2**63)),
                          ('--envelope-strength','-1'),('--smoothing-ms','inf'),

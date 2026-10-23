@@ -1,10 +1,13 @@
 #include "elf.hpp"
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#if !defined(DSEE_ELF_PARSER_ONLY)
 #include <sys/mman.h>
 #include <unistd.h>
+#endif
 #include <unordered_set>
 namespace dsee {
 namespace {
@@ -29,10 +32,9 @@ uint64_t plus_signed(uint64_t a, int64_t b) {
     return a - n;
 }
 int64_t signed_add(int64_t a, int64_t b) {
-    int64_t r;
-    if (__builtin_add_overflow(a, b, &r))
+    if ((b > 0 && a > INT64_MAX - b) || (b < 0 && a < INT64_MIN - b))
         bad("ELF addend overflow");
-    return r;
+    return a + b;
 }
 struct Reader {
     const std::vector<uint8_t> &b;
@@ -229,6 +231,7 @@ Elf::Elf(std::vector<uint8_t> input) : bytes(std::move(input)) {
         }
     }
 }
+#if !defined(DSEE_ELF_PARSER_ONLY)
 Image::Image(const Elf &elf, const std::function<void *(const std::string &)> &resolve)
     : symbols(elf.symbols) {
     size_t page = size_t(sysconf(_SC_PAGESIZE));
@@ -328,4 +331,5 @@ void *Image::symbol(const std::string &name) const {
             return base + s.value;
     throw std::runtime_error("Missing symbol: " + name);
 }
+#endif
 } // namespace dsee

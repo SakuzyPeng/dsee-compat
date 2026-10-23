@@ -39,7 +39,7 @@ class WavWriter {
 
   private:
     FILE *file = nullptr;
-    std::string destination, temporary;
+    std::filesystem::path destination, temporary;
     unsigned rate;
     void header();
 };
