@@ -57,4 +57,4 @@ python3 tests/integration.py --exe build/dsee-compat --assets /path/to/resource-
 
 ## Docs to keep in sync
 
-`docs/API.md` (C API contract; status/profile enum values are ABI-fixed for 0.1), `docs/POSTPROCESS.md` (optional offline controls), `docs/VALIDATION.md` (local test record), `docs/DISTRIBUTION.md` (provenance and what stays out of the repo), and the README's supported-input list. `dsee_version()` and `project(VERSION)` in `CMakeLists.txt` are both `0.1.0`.
+`docs/API.md` (C API contract; status/profile enum values are ABI-fixed for 0.1), `docs/DSEE.md` (pinned-firmware mechanism summary and evidence limits), `docs/POSTPROCESS.md` (optional offline controls), `docs/VALIDATION.md` (local test record), `docs/DISTRIBUTION.md` (provenance and what stays out of the repo), and the README's supported-input list. `dsee_version()` and `project(VERSION)` in `CMakeLists.txt` are both `0.1.0`.

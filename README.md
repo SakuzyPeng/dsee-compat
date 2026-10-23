@@ -133,6 +133,9 @@ Windows 构建还需要在消费项目中提供 Dynarmic 安装前缀；CMake �
 
 ## 处理流程
 
+这里说明兼容层的分块与排空行为。固件内部的 DRX / DSX、神经网络作用、配置分支及
+高频实验结论见 [DSEE 处理流程与原理](docs/DSEE.md)。
+
 - 输入按小缓冲区流式读取。
 - 最后不满一块的输入用零补齐到 1024 输入帧。
 - 之后持续送入零块，直到连续四块输出全为零为止；排空最多额外 48 个零块，**排空不了就报错**，不会悄悄截断结果。
@@ -262,6 +265,7 @@ python3 tools/check_distribution.py
 
 ## 文档
 
+[DSEE 处理流程与原理](docs/DSEE.md) ·
 [C API 约定](docs/API.md) ·
 [可调后处理](docs/POSTPROCESS.md) ·
 [验证记录](docs/VALIDATION.md) ·

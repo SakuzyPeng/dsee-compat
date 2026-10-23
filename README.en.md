@@ -150,6 +150,10 @@ Run `build/dsee-compat --help` for usage and `--version` for the version.
 
 ## How processing works
 
+This section describes the compatibility layer's buffering and draining. For the firmware's DRX / DSX
+stages, neural-network roles, configuration branches and spectral experiments, see
+[DSEE processing and principles (Chinese)](docs/DSEE.md).
+
 - Input is streamed in small buffers.
 - The final partial block is zero-filled to 1024 input frames.
 - Zero blocks are then fed until four consecutive blocks produce all-zero output. Draining is limited to 48 extra
@@ -299,6 +303,7 @@ is permitted.
 
 ## Documentation
 
+[DSEE processing and principles (Chinese)](docs/DSEE.md) ·
 [C API contract](docs/API.md) ·
 [Adjustable postprocessing](docs/POSTPROCESS.md) ·
 [Validation record](docs/VALIDATION.md) ·

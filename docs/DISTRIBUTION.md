@@ -30,6 +30,23 @@ Keep the license and distribution documentation with redistributed install trees
 The install rules do not collect notices for separately supplied dependencies;
 binary packages must also include the applicable dependency license materials.
 
+## Mechanism documentation
+
+[DSEE processing and principles (Chinese)](DSEE.md) summarizes the pinned firmware's
+signal flow using newly written explanations, an authored diagram and limited
+measurement summaries. It distinguishes public product descriptions, local
+structural observations, measured behavior and interpretation. The underlying
+research records remain external; the document is not an independently reproducible
+specification of the proprietary DSP or a strict clean-room account.
+
+Keep complete model/topology exports, learned values, original diagrams,
+decompiler output and instruction-by-instruction rewrites out of this documentation.
+Explaining functional principles does not establish permission to distribute the
+underlying implementation or circumvent access controls. The document discusses
+the limited relevance of copyright's idea/expression distinction and interoperability
+exceptions with links to legal sources; it does not establish clearance under
+software licenses, patent, trade-secret or other applicable law.
+
 ## What stays outside the repository
 
 - Sony libraries, firmware and parameter/model files, including copies in archives or Git LFS.
