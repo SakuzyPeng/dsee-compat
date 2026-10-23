@@ -30,6 +30,8 @@ find_package(dsee_compat CONFIG REQUIRED)
 add_executable(client main.c)
 target_link_libraries(client PRIVATE dsee::dsee_compat)
 set_target_properties(client PROPERTIES LINKER_LANGUAGE CXX)
+file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/client-$<CONFIG>.path"
+     CONTENT "$<TARGET_FILE:client>")
 ''')
 cache = {}
 for line in (pathlib.Path(a.build) / 'CMakeCache.txt').read_text().splitlines():
@@ -50,7 +52,6 @@ if a.boost:
                     '-DCMAKE_POLICY_DEFAULT_CMP0167=OLD']
 for command in commands:
     subprocess.run(command, check=True)
-executables = list((root / 'build').glob('client')) + list((root / 'build').glob('client.exe')) + list((root / 'build' / a.config).glob('client.exe'))
-assert len(executables) == 1, executables
-subprocess.run([str(executables[0])], check=True)
+executable = (root / 'build' / f'client-{a.config}.path').read_text(encoding='utf-8')
+subprocess.run([executable], check=True)
 print('Installed C client linked and ran without resources')
