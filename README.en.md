@@ -98,7 +98,9 @@ cmake --install build --prefix <destination>
 ```
 
 This installs the CLI, the public and internal support archives, the public headers, and a CMake package
-that propagates static link dependencies. Windows consumers also provide the Dynarmic installation prefix.
+that propagates static link dependencies. `LICENSE` and the public documentation, including distribution
+boundaries, are installed to `share/doc/dsee_compat` by default; override `CMAKE_INSTALL_DOCDIR` to change it.
+Windows consumers also provide the Dynarmic installation prefix.
 CMake does not download dependencies.
 
 ## Preparing the external resource directory

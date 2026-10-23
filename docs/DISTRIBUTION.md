@@ -22,6 +22,14 @@ Dynarmic's own code is under 0BSD; its bundled dependencies retain their own
 licenses. Dependency sources, build products and synthetic PCM remain outside
 the source distribution. No original resource is included in either probe.
 
+## Installed distribution materials
+
+The standard CMake installation includes this project's `LICENSE` and all public
+documentation under `share/doc/dsee_compat` by default (`CMAKE_INSTALL_DOCDIR`).
+Keep the license and distribution documentation with redistributed install trees.
+The install rules do not collect notices for separately supplied dependencies;
+binary packages must also include the applicable dependency license materials.
+
 ## What stays outside the repository
 
 - Sony libraries, firmware and parameter/model files, including copies in archives or Git LFS.

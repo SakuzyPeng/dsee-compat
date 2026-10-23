@@ -87,6 +87,7 @@ cmake --install build --prefix <目标目录>
 ```
 
 会安装 CLI、公开静态库及内部支持库、两个公开头文件，以及传递静态链接依赖的 CMake 包。
+`LICENSE` 和公开文档（包括分发边界说明）默认安装到 `share/doc/dsee_compat`；可通过 `CMAKE_INSTALL_DOCDIR` 调整。
 Windows 构建还需要在消费项目中提供 Dynarmic 安装前缀；CMake 不下载依赖。
 
 ## 准备外部资源目录

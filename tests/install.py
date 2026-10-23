@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the installed static package from a separate C translation unit."""
+"""Verify distribution documents and the installed package's C linkage."""
 import argparse
 import pathlib
 import subprocess
@@ -8,6 +8,7 @@ p = argparse.ArgumentParser()
 p.add_argument('--build', required=True)
 p.add_argument('--cmake', required=True)
 p.add_argument('--config', default='Release')
+p.add_argument('--docdir', required=True)
 p.add_argument('--prefix-path', default='')
 p.add_argument('--boost', default='')
 a = p.parse_args()
@@ -52,6 +53,16 @@ if a.boost:
                     '-DCMAKE_POLICY_DEFAULT_CMP0167=OLD']
 for command in commands:
     subprocess.run(command, check=True)
+repository = pathlib.Path(__file__).resolve().parents[1]
+documents = [repository / 'LICENSE', *sorted((repository / 'docs').glob('*.md'))]
+manifest = {pathlib.Path(line) for line in
+            (pathlib.Path(a.build) / 'install_manifest.txt').read_text(encoding='utf-8').splitlines()}
+for document in documents:
+    installed = prefix / a.docdir / document.name
+    if installed not in manifest or not installed.is_file():
+        raise RuntimeError(f'Missing installed distribution document: {installed}')
+    if installed.read_bytes() != document.read_bytes():
+        raise RuntimeError(f'Installed distribution document differs from source: {installed}')
 executable = (root / 'build' / f'client-{a.config}.path').read_text(encoding='utf-8')
 subprocess.run([executable], check=True)
-print('Installed C client linked and ran without resources')
+print('Installed license/documentation verified; C client linked and ran without resources')
